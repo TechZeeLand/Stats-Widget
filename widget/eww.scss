@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// ═══════════════════════════════════════════════════════════════════════════
+//  STATS WIDGET - look & feel
+//  (GTK3 CSS: no flexbox/grid/gap. Sizes are set in eww.yuck.in, colours here.)
+//  Every pixel value goes through sx() / sy() / sf(): they scale it with the widget size chosen
+//  in the settings (horizontal / vertical / the smaller of both). At 795 x 475 they change nothing.
+//  After editing, run:  stats-widget reload
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── palette (taken from the Rainmeter skin) ─────────────────────────────
+@import "theme";       // generated from config.toml (background_opacity, $sx $sy $sf $border)
+@function sx($n) { @return round($n * $sx) * 1px; }
+@function sy($n) { @return round($n * $sy) * 1px; }
+@function sf($n) { @return round($n * $sf) * 1px; }
+$bg:       rgba(0, 0, 0, $bg-opacity);
+$fg:       #ffffff;
+$on-light: #000000;     // text on the white bars
+$grey:     #aaaaaa;     // days of the previous / next month
+$red:      #ff0000;     // Fri + Sat
+$green:    #00ff00;     // healthy
+$amber:    #ffb000;     // warning (e.g. RAID syncing)
+$font:     "Alata", sans-serif;
+
+// reset every GTK default so nothing from your desktop theme leaks in
+* {
+  all: unset;
+}
+
+// ── window frame ────────────────────────────────────────────────────────
+.root {
+  background-color: $bg;
+  border: $border solid $fg;
+  color: $fg;
+  font-family: $font;
+  font-size: sf(16);
+}
+
+// 5px white lines between the three columns
+.col-mid, .col-pc {
+  border-left: sf(5) solid $fg;
+}
+
+// ── bars ────────────────────────────────────────────────────────────────
+.bigbar {
+  background-color: $fg;
+}
+.bigbar-text {
+  color: $on-light;
+  font-size: sf(27);
+  font-weight: 700;
+}
+
+.minibar {
+  background-color: $fg;
+  margin-top: sy(4);
+  margin-bottom: sy(4);
+}
+.minibar-text {
+  color: $on-light;
+  font-size: sf(15);
+  font-weight: 700;
+}
+
+// ── "Label ....... value" rows ──────────────────────────────────────────
+.rows {
+  margin-bottom: sy(2);
+}
+.row {
+  min-height: sy(21);
+  padding: 0 sx(13) 0 sx(11);
+}
+.row-name, .row-val {
+  color: $fg;
+  font-size: sf(14);
+}
+.ok   { color: $green; }
+.warn { color: $amber; }
+.bad  { color: $red; }
+
+// thin usage bars
+.barrow .row {
+  min-height: sy(21);
+}
+.barrow {
+  margin-bottom: 0;
+}
+.bar {
+  margin: 0 sx(13) 0 sx(11);
+  min-height: sy(5);
+}
+.bar trough {
+  min-height: sy(5);
+  background-color: rgba(255, 255, 255, 0.18);
+  border-radius: sf(3);
+}
+.bar progress {
+  min-height: sy(5);
+  background-color: $fg;
+  border-radius: sf(3);
+}
+.bar.hot progress { background-color: $red; }
+
+// dim the server numbers when the server can't be reached
+.offline .row-val { color: $grey; }
+
+// ── clock ───────────────────────────────────────────────────────────────
+.clock-time {
+  font-size: sf(80);
+  font-weight: 600;
+  color: $fg;
+}
+// the white tab with the seconds, sitting on top of the divider line
+.sec-box {
+  background-color: $fg;
+  border-radius: sf(10) sf(10) 0 0;
+}
+.sec-text {
+  color: $on-light;
+  font-size: sf(32);
+  font-weight: 600;
+}
+.clock-date {
+  font-size: sf(11);
+  letter-spacing: 1.5px * $sf;
+  color: rgba(255, 255, 255, 0.55);
+  margin-bottom: sy(6);
+}
+.divider {
+  background-color: $fg;
+}
+
+// ── weather ─────────────────────────────────────────────────────────────
+.wx-pin {
+  font-family: "Material Icons Outlined";
+  font-size: sf(13);
+}
+.wx-city {
+  font-size: sf(11);
+}
+.wx-phrase {
+  font-size: sf(13);
+  color: rgba(255, 255, 255, 0.5);
+}
+.wx-temp {
+  font-size: sf(59);
+}
+.wx-strip {
+  background-color: $fg;
+}
+.wx-small {
+  color: $on-light;
+  font-size: sf(14);
+}
+.gap {
+  min-width: sx(8);
+}
+// Icons are ligatures of the bundled "Material Icons Outlined" font (Apache-2.0): the text "wb_twilight"
+// is drawn as a picture. The big weather picture is the same font at a large size.
+.ico {
+  font-family: "Material Icons Outlined";
+  color: $on-light;
+  font-size: sf(18);
+}
+.wx-icon {
+  font-family: "Material Icons Outlined";
+  font-size: sf(45);
+  color: $fg;
+}
+
+// ── calendar ────────────────────────────────────────────────────────────
+.month-text {
+  font-size: sf(15);
+  font-weight: 600;
+  letter-spacing: 0.5px * $sf;
+}
+.weekday-bar {
+  background-color: $fg;
+}
+.wd {
+  color: $on-light;
+  font-size: sf(12);
+  font-weight: 600;
+}
+.wd-red {
+  color: $red;
+}
+.day {
+  font-size: sf(17);
+  font-weight: 600;
+  color: $fg;
+  border: sf(2) solid transparent;   // reserves space so the "today" box doesn't shift the numbers
+  border-radius: sf(5);
+}
+.day.wk    { color: $red; }
+.day.out   { color: $grey; }
+.day.today {
+  border-color: $fg;
+}

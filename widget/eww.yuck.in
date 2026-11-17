@@ -1,0 +1,239 @@
+;; SPDX-License-Identifier: AGPL-3.0-or-later
+;; ═══════════════════════════════════════════════════════════════════════════
+;;  STATS WIDGET  -  https://github.com/TechZeeLand/Stats-Widget
+;;
+;;   ┌───────────────┬─────────────────┬────────────────┐
+;;   │ Server Stats  │  Clock          │ PC Stats       │
+;;   │ (stats.php)   │  Weather        │ (this computer)│
+;;   │               │  Calendar       │                │
+;;   └───────────────┴─────────────────┴────────────────┘
+;;
+;;  THIS FILE IS A TEMPLATE (eww.yuck.in). scripts/apply_config.py turns it into eww.yuck for the
+;;  size chosen in the settings: {{x:249}} = 249 px scaled horizontally, {{y:50}} = scaled vertically,
+;;  {{f:14}} = scaled with the smaller of the two (fonts, icons). At the default 795 x 475 the numbers are unchanged.
+;;
+;;  Settings live in   ~/.config/stats-widget/config.toml   (or run: stats-widget config)
+;;  Colours/fonts in   eww.scss          Window position + size in   window.yuck (generated)
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(include "window.yuck")
+
+;; ───────────────────────────── DATA SOURCES ─────────────────────────────
+;; Each `deflisten` starts a script ONCE; every JSON line it prints becomes the new value.
+;; `:initial` is shown until the first line arrives.
+
+(deflisten clock
+  :initial '{"time":"--:--","sec":"--","date":""}'
+  "python3 scripts/clock.py")
+
+(deflisten server
+  :initial '{"ok":false,"title":"Connecting…","uptime":"N/A","load":"N/A","cpu":"N/A","cpu_p":0,"temp":"N/A","ram":"N/A","ram_p":0,"swap":"N/A","ssd":"N/A","ssd_p":0,"raid_name":"RAID","raid":"N/A","raid_p":0,"raid_status":"","raid_cls":"","down":"N/A","up":"N/A"}'
+  "python3 scripts/server.py")
+
+(deflisten weather
+  :initial '{"ok":false,"city":"","temp":"--°","phrase":"","icon":"help_outline","sunrise":"--","sunset":"--","humidity":"--","precip":"--","wind":"--","wind_icon":"south"}'
+  "python3 scripts/weather.py")
+
+(deflisten cal
+  :initial '{"title":"","weeks":[]}'
+  "python3 scripts/calendar_grid.py")
+
+(deflisten pc
+  :initial '{"cpu_title":"CPU","cpu_use":"N/A","cpu_p":0,"cpu_temp":"N/A","uptime":"N/A","gpu_title":"GPU","gpu_use":"N/A","gpu_temp":"N/A","gpu_row3_name":"Clock:","gpu_row3":"N/A","ram":"N/A","ram_p":0,"disk":"N/A","disk_p":0,"has_battery":false,"battery":"","down":"N/A","up":"N/A"}'
+  "python3 scripts/pcstats.py")
+
+;; true while the mouse is over the sunrise/sunset strip (reveals humidity / rain / wind)
+(defvar wx_hover false)
+
+
+;; ───────────────────────────── ROOT ─────────────────────────────
+;; Right-click anywhere on the widget = "move mode" (drag a ghost of the widget, click to drop it).
+
+(defwidget stats-widget []
+  (eventbox :onrightclick "python3 scripts/move.py &"
+    (box :class "root" :orientation "h" :space-evenly false
+      (server-col)
+      (middle-col)
+      (pc-col))))
+
+
+;; ───────────────────────────── SMALL BUILDING BLOCKS ─────────────────────────────
+
+;; "Label ............ value"   (vclass colours the value, e.g. ok / warn / bad)
+(defwidget rowc [name val vclass]
+  (box :class "row" :orientation "h" :space-evenly false
+    (label :class "row-name" :valign "start" :xalign 0 :text name)
+    (label :class "row-val ${vclass}" :valign "start" :hexpand true :xalign 1 :limit-width 28 :text val)))
+
+(defwidget row [name val]
+  (rowc :name name :val val :vclass ""))
+
+;; a row with a thin usage bar underneath; pct = 0..100
+(defwidget barrow [name val pct]
+  (box :class "barrow" :orientation "v" :space-evenly false
+    (row :name name :val val)
+    (progress :class "bar ${pct >= 90 ? 'hot' : ''}" :value pct :orientation "h" :height {{y:5}})))
+
+;; big white title bar with black text; h = height in px
+(defwidget bigbar [text h]
+  (box :class "bigbar" :height h
+    (label :class "bigbar-text" :hexpand true :limit-width 26 :text text)))
+
+;; thinner white section bar
+(defwidget minibar [text]
+  (box :class "minibar" :height {{y:28}}
+    (label :class "minibar-text" :hexpand true :limit-width 30 :text text)))
+
+
+;; ───────────────────────────── COLUMN 1 : SERVER ─────────────────────────────
+
+(defwidget server-col []
+  (box :class "col col-server ${server.ok ? '' : 'offline'}" :orientation "v" :space-evenly false :width {{c1}}
+    (bigbar :text "Server Stats" :h {{y:50}})
+
+    (minibar :text {server.title})
+    (box :class "rows" :orientation "v" :space-evenly false
+      (row :name "Uptime:"       :val {server.uptime})
+      (row :name "Load average:" :val {server.load}))
+
+    (minibar :text "CPU & Memory")
+    (box :class "rows" :orientation "v" :space-evenly false
+      (barrow :name "CPU:"  :val {server.cpu} :pct {server.cpu_p})
+      (row    :name "Temperature:" :val {server.temp})
+      (barrow :name "RAM:"  :val {server.ram} :pct {server.ram_p})
+      (row    :name "Swap:" :val {server.swap}))
+
+    (minibar :text "Storage")
+    (box :class "rows" :orientation "v" :space-evenly false
+      (barrow :name "System:" :val {server.ssd} :pct {server.ssd_p})
+      (barrow :name "${server.raid_name}:" :val {server.raid} :pct {server.raid_p})
+      (rowc   :name "Status:" :val {server.raid_status} :vclass {server.raid_cls}))
+
+    (minibar :text "Network")
+    (box :class "rows" :orientation "v" :space-evenly false
+      (row :name "Download:" :val {server.down})
+      (row :name "Upload:"   :val {server.up}))))
+
+
+;; ───────────────────────────── COLUMN 2 : CLOCK + WEATHER + CALENDAR ─────────────────────────────
+
+(defwidget middle-col []
+  (box :class "col col-mid" :orientation "v" :space-evenly false :width {{c2}}
+    ;; --- clock -------------------------------------------------------------
+    (box :class "clock-area" :orientation "h" :space-evenly false :height {{y:108}}
+      (overlay :hexpand true
+        (label :class "clock-time" :hexpand true :text {clock.time})
+        (label :class "clock-date" :halign "center" :valign "end" :text {clock.date}))
+      (box :class "sec-box" :valign "end" :halign "end" :width {{x:55}} :height {{y:55}}
+        (label :class "sec-text" :hexpand true :text {clock.sec})))
+    (box :class "divider" :height {{y:5}})
+
+    ;; --- weather -----------------------------------------------------------
+    (weather-section)
+    (box :class "divider" :height {{y:5}})
+
+    ;; --- calendar ----------------------------------------------------------
+    (calendar-section)))
+
+;; The weather block uses an `overlay`: the first child only gives the size,
+;; every other child is placed with margin-left / margin-top (like Rainmeter's X / Y).
+;; The weather picture is a glyph of the bundled Material Icons font (weather.icon = glyph name).
+(defwidget weather-section []
+  (overlay
+    (box :width {{x:260}} :height {{y:145}})
+
+    (label :class "wx-pin" :halign "start" :valign "start"
+           :style "margin-left: {{x:6}}px; margin-top: {{y:14}}px;" :text "place")
+    (label :class "wx-city" :halign "start" :valign "start" :limit-width 22
+           :style "margin-left: {{x:26}}px; margin-top: {{y:13}}px;" :text {weather.city})
+
+    (label :class "wx-icon" :halign "start" :valign "start"
+           :style "margin-left: {{x:51}}px; margin-top: {{y:37}}px;" :text {weather.icon})
+    (label :class "wx-phrase" :halign "start" :valign "start" :limit-width 22
+           :style "margin-left: {{x:16}}px; margin-top: {{y:87}}px;" :text {weather.phrase})
+
+    (label :class "wx-temp" :halign "start" :valign "start"
+           :style "margin-left: {{x:141}}px; margin-top: {{y:12}}px;" :text {weather.temp})
+
+    (weather-strip)))
+
+;; white strip: sunrise + sunset  ->  (hover)  humidity + rain chance + wind
+(defwidget weather-strip []
+  (box :halign "start" :valign "start" :style "margin-top: {{y:112}}px;"
+    (eventbox :width {{x:251}} :height {{y:20}} :class "wx-strip"
+              :onhover "${EWW_CMD} update wx_hover=true"
+              :onhoverlost "${EWW_CMD} update wx_hover=false"
+      (stack :selected {wx_hover ? 1 : 0} :transition "slideup" :same-size true
+        (box :orientation "h" :space-evenly false :halign "center" :valign "center" :spacing {{x:4}}
+          (label :class "ico" :text "wb_twilight")
+          (label :class "ico" :text "arrow_upward")
+          (label :class "wx-small" :text {weather.sunrise})
+          (label :class "gap" :text "")
+          (label :class "ico" :text "wb_twilight")
+          (label :class "ico" :text "arrow_downward")
+          (label :class "wx-small" :text {weather.sunset}))
+        (box :orientation "h" :space-evenly false :halign "center" :valign "center" :spacing {{x:4}}
+          (label :class "ico" :text "water_drop")
+          (label :class "wx-small" :text {weather.humidity})
+          (label :class "gap" :text "")
+          (label :class "ico" :text "umbrella")
+          (label :class "wx-small" :text {weather.precip})
+          (label :class "gap" :text "")
+          (label :class "ico" :text {weather.wind_icon})
+          (label :class "wx-small" :text {weather.wind}))))))
+
+(defwidget calendar-section []
+  (box :orientation "v" :space-evenly false
+    (box :class "month-bar" :height {{y:32}}
+      (label :class "month-text" :hexpand true :text {cal.title}))
+
+    ;; weekday header (Fri + Sat are red = Bangladesh weekend)
+    (box :class "weekday-bar" :orientation "h" :space-evenly false :height {{y:27}} :valign "start"
+      (label :class "wd" :width {{x:37}} :text "SUN")
+      (label :class "wd" :width {{x:37}} :text "MON")
+      (label :class "wd" :width {{x:37}} :text "TUE")
+      (label :class "wd" :width {{x:37}} :text "WED")
+      (label :class "wd" :width {{x:37}} :text "THU")
+      (label :class "wd wd-red" :width {{x:37}} :text "FRI")
+      (label :class "wd wd-red" :width {{x:37}} :text "SAT"))
+
+    ;; 6 weeks x 7 days. The class string from calendar_grid.py is
+    ;;   "out" (other month, grey)  "wk" (Fri/Sat, red)  "today" (boxed)
+    (box :class "cal-grid" :orientation "v" :space-evenly false
+      (for week in {cal.weeks}
+        (box :orientation "h" :space-evenly false
+          (for d in {week}
+            (box :class "cell" :width {{x:37}} :height {{y:22}}
+              (box :class "day ${d.c}" :halign "center" :valign "center" :width {{x:25}} :height {{y:20}}
+                (label :hexpand true :text {d.d})))))))))
+
+
+;; ───────────────────────────── COLUMN 3 : THIS PC ─────────────────────────────
+
+(defwidget pc-col []
+  (box :class "col col-pc" :orientation "v" :space-evenly false :width {{c3}}
+    (bigbar :text "PC Stats" :h {{y:50}})
+
+    (minibar :text {pc.cpu_title})
+    (box :class "rows" :orientation "v" :space-evenly false
+      (barrow :name "Utilization:" :val {pc.cpu_use} :pct {pc.cpu_p})
+      (row    :name "Temperature:" :val {pc.cpu_temp})
+      (row    :name "Uptime:"      :val {pc.uptime}))
+
+    (minibar :text {pc.gpu_title})
+    (box :class "rows" :orientation "v" :space-evenly false
+      (row :name "Utilization:"       :val {pc.gpu_use})
+      (row :name "Temperature:"       :val {pc.gpu_temp})
+      (row :name {pc.gpu_row3_name}   :val {pc.gpu_row3}))
+
+    (minibar :text "Memory & Disk")
+    (box :class "rows" :orientation "v" :space-evenly false
+      (barrow :name "RAM:"  :val {pc.ram}  :pct {pc.ram_p})
+      (barrow :name "Disk:" :val {pc.disk} :pct {pc.disk_p})
+      (box :visible {pc.has_battery}
+        (row :name "Battery:" :val {pc.battery})))
+
+    (minibar :text "Network")
+    (box :class "rows" :orientation "v" :space-evenly false
+      (row :name "Download:" :val {pc.down})
+      (row :name "Upload:"   :val {pc.up}))))

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# stats-widget - control the Stats Widget (https://github.com/TechZeeLand/Stats-Widget)
+set -u
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+APP="$(cd "$(dirname "$SELF")/.." && pwd)"            # the widget folder (has eww.yuck)
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+EWW=(eww --config "$APP")
+VERSION="$(cat "$APP/VERSION" 2>/dev/null || echo dev)"
+
+die() { echo "stats-widget: $*" >&2; exit 1; }
+need_eww() { command -v eww >/dev/null || die "eww is not installed (re-run the installer)."; }
+apply() { python3 "$APP/scripts/apply_config.py"; }
+is_open() { "${EWW[@]}" active-windows 2>/dev/null | grep -q '^stats'; }
+
+daemon_up() { "${EWW[@]}" ping >/dev/null 2>&1; }
+
+start() {
+  need_eww; apply
+  if ! daemon_up; then
+    "${EWW[@]}" daemon >/dev/null 2>&1 </dev/null     # forks into the background
+    for _ in $(seq 1 25); do daemon_up && break; sleep 0.2; done
+    daemon_up || die "the eww daemon did not start - run: eww --config $APP daemon --no-daemonize"
+  fi
+  if is_open; then "${EWW[@]}" reload; else "${EWW[@]}" open stats; fi
+}
+
+autostart() {
+  local file="$HOME/.config/autostart/stats-widget.desktop"
+  case "${1:-}" in
+    on)  mkdir -p "$(dirname "$file")"
+         cat > "$file" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Stats Widget
+Comment=Desktop stats widget (eww)
+Exec=sh -c "sleep 4 && $SELF start"
+X-KDE-autostart-after=panel
+Terminal=false
+DESKTOP
+         echo "Autostart enabled ($file)" ;;
+    off) rm -f "$file"; echo "Autostart disabled" ;;
+    *)   [ -f "$file" ] && echo "Autostart: on" || echo "Autostart: off"
+         echo "Usage: stats-widget autostart on|off" ;;
+  esac
+}
+
+# stats-widget update          new widget files only (fast, keeps your settings)
+# stats-widget update --full   also re-runs the package + eww step (only needed when the release notes say so)
+update() {
+  local args="--widget-only" was_running=0
+  [ "${1:-}" = "--full" ] && args=""
+  is_open && was_running=1
+  # shellcheck disable=SC2086
+  curl -fsSL https://raw.githubusercontent.com/TechZeeLand/Stats-Widget/main/install.sh | bash -s -- $args || die "update failed"
+  if [ "$was_running" -eq 1 ]; then "$APP/bin/stats-widget" restart; fi
+}
+
+doctor() {
+  local ok=0
+  chk() { if eval "$2" >/dev/null 2>&1; then printf '  \033[32m✓\033[0m %s\n' "$1"; else printf '  \033[31m✗\033[0m %s  -> %s\n' "$1" "$3"; ok=1; fi; }
+  echo "Stats Widget $VERSION  ·  session: ${XDG_SESSION_TYPE:-unknown}  ·  desktop: ${XDG_CURRENT_DESKTOP:-unknown}"
+  chk "eww installed ($(eww --version 2>/dev/null | head -1))" "command -v eww" "run the installer again"
+  chk "python3 >= 3.8" "python3 -c 'import sys; sys.exit(sys.version_info < (3,8))'" "install python3"
+  chk "Python GTK bindings (settings window / move mode)" "python3 -c \"import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk; import cairo\"" "install python3-gobject + python3-cairo (python3-gi-cairo on Debian)"
+  chk "fonts installed (Alata, Material Icons Outlined)" "[ \$(fc-list | grep -c -E 'Alata|Material Icons Outlined') -ge 2 ]" "run: fc-cache -f ; or re-run the installer"
+  chk "config readable ($(python3 -c "import sys; sys.path.insert(0,'$APP/scripts'); import common; print(common.config_path())"))" "python3 -c \"import sys; sys.path.insert(0,'$APP/scripts'); import common; common.load_config()\"" "fix the syntax error in config.toml"
+  echo "  Server addresses:"
+  python3 - "$APP/scripts" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+import common, server
+s = common.load_config()["server"]
+for i, u in enumerate(s["urls"]):
+    try:
+        d = server.fetch(u, s["token"], float(s["timeout"]))
+        raid = d.get("raid", {}) if isinstance(d, dict) else {}
+        extra = "" if raid.get("ok", True) else f"  (RAID: {raid.get('error')})"
+        print(f"    \033[32m✓\033[0m {u}  host={d.get('host','?')}{extra}")
+    except Exception as e:
+        print(f"    \033[31m✗\033[0m {u}  {getattr(e,'reason',e)}")
+PY
+  return $ok
+}
+
+case "${1:-help}" in
+  start|open)   start ;;
+  stop|close)   need_eww; "${EWW[@]}" close stats; "${EWW[@]}" kill ;;
+  restart)      need_eww; "${EWW[@]}" kill 2>/dev/null; sleep 1; start ;;
+  reload)       need_eww; apply; "${EWW[@]}" reload ;;
+  status)       need_eww; if is_open; then echo "running"; else echo "not running"; exit 1; fi ;;
+  logs)         need_eww; "${EWW[@]}" logs ;;
+  config|settings) exec python3 "$APP/scripts/configure.py" ;;
+  move)         exec python3 "$APP/scripts/move.py" ;;
+  size)         exec python3 "$APP/scripts/resize.py" "${@:2}" ;;
+  autostart)    autostart "${2:-}" ;;
+  doctor)       doctor ;;
+  update)       update "${2:-}" ;;
+  uninstall)    shift; exec bash "$APP/uninstall.sh" "$@" ;;
+  version|-v|--version) echo "stats-widget $VERSION" ;;
+  help|-h|--help|*)
+    cat <<HELP
+stats-widget $VERSION
+
+  stats-widget start          show the widget (or reload it if already shown)
+  stats-widget stop           hide it and stop the eww background process
+  stats-widget restart        stop + start
+  stats-widget reload         re-read config / theme without restarting scripts' network state
+  stats-widget config         open the settings window
+  stats-widget move           drag the widget to a new place (also: right-click the widget)
+  stats-widget size [120%|WxH|reset]   show or change the widget size (also: stats-widget config)
+  stats-widget autostart on|off   start with your desktop session
+  stats-widget doctor         check dependencies, fonts and server connectivity
+  stats-widget logs           show eww's log
+  stats-widget update [--full]   install the latest version (keeps your settings)
+  stats-widget uninstall [--purge]
+HELP
+    ;;
+esac

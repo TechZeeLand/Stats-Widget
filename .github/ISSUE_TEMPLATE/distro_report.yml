@@ -1,0 +1,17 @@
+name: Distro report
+description: I ran the installer on my distribution - tell us how it went
+labels: [distro]
+body:
+  - type: input
+    id: distro
+    attributes: {label: Distribution and version, placeholder: "Arch Linux (rolling) / Rocky 9.4 / openSUSE Tumbleweed"}
+    validations: {required: true}
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: ["Worked without changes", "Worked after a manual fix (describe below)", "Failed"]
+    validations: {required: true}
+  - type: textarea
+    id: details
+    attributes: {label: Details / error output, render: text}

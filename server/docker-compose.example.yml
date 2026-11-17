@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Stats Widget server endpoint in Docker. See docs/SERVER_SETUP.md
+services:
+  stats:
+    image: php:8.3-cli
+    container_name: stats-widget-server
+    network_mode: host          # real network-interface counters; listens on the host's port below
+    restart: unless-stopped
+    command: php -S 0.0.0.0:8099 -t /app
+    volumes:
+      - ./stats.php:/app/stats.php:ro
+      - ./stats.config.php:/app/stats.config.php:ro   # copy from stats.config.example.php
+      - /raids:/raids:ro                              # <- mount your RAID / storage pool here
