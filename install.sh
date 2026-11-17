@@ -33,6 +33,7 @@ family_of() {
   echo generic
 }
 FAMILY="${STATS_WIDGET_DISTRO:-$(family_of)}"
+# shellcheck disable=SC1091
 PRETTY="$( (. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-$ID}") || echo Linux)"
 say "Detected $PRETTY  →  installer family: $FAMILY"
 export DISPLAY_NAME="$PRETTY"

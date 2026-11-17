@@ -30,15 +30,18 @@ need_root() {
 rust_ok() {
   command -v cargo >/dev/null && command -v rustc >/dev/null || return 1
   local v; v="$(rustc --version | sed -E 's/rustc ([0-9]+)\.([0-9]+).*/\1 \2/')"
+  # shellcheck disable=SC2086   # splitting "major minor" into two arguments is intended
   set -- $v
   [ "$1" -gt 1 ] || [ "$2" -ge 81 ]
 }
 ensure_rust() {
+  # shellcheck disable=SC1091
   [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
   rust_ok && return
   say "Installing Rust (rustup, minimal profile) - needed once to build eww"
   curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
     || die "Could not install Rust. Install it from https://rustup.rs and run this installer again."
+  # shellcheck disable=SC1091
   . "$HOME/.cargo/env"
 }
 
