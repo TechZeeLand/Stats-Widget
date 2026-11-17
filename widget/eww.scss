@@ -145,10 +145,10 @@ $font:     "Alata", sans-serif;
   font-size: sf(59);
 }
 .wx-strip {
-  background-color: $fg;
+  background-color: transparent;
 }
 .wx-small {
-  color: $on-light;
+  color: $fg;
   font-size: sf(14);
 }
 .gap {
@@ -158,7 +158,7 @@ $font:     "Alata", sans-serif;
 // is drawn as a picture. The big weather picture is the same font at a large size.
 .ico {
   font-family: "Material Icons Outlined";
-  color: $on-light;
+  color: $fg;
   font-size: sf(18);
 }
 .wx-icon {

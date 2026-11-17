@@ -7,6 +7,8 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - `stats-widget update --full`; `stats-widget update` now restarts a running widget by itself.
 - The installer backs up a recognisable pre-0.2 installation in `~/.config/eww` and warns about old autostart entries.
 ### Changed
+- Server: Docker setup is built from GitHub (`docker-compose.yml` + `server/Dockerfile`) so Portainer's *Repository* option works; `stats.php` reads `STATS_*` environment variables.
+- Sunrise/sunset and humidity/rain/wind strip: no white background, centred in the weather block.
 - Weather, sunrise/sunset, humidity, rain and wind pictures are Material Icons glyphs (Apache-2.0). Wind arrow now shows where the wind blows **to**.
 - `eww.yuck` is generated from `eww.yuck.in`.
 ### Removed

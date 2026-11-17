@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Stats Widget server endpoint (stats.php) in Docker.
+# Portainer: Stacks -> Add stack -> Repository -> this repo, compose path "docker-compose.yml".
+# Settings go in "Environment variables" (see docs/SERVER_SETUP.md); nothing needs editing in this file.
+services:
+  stats:
+    build:
+      context: ./server
+    image: stats-widget-server:latest
+    container_name: stats-widget-server
+    network_mode: host                       # real network-card counters; listens on the host's STATS_PORT
+    restart: unless-stopped
+    environment:
+      STATS_PORT: ${STATS_PORT:-8099}
+      STATS_RAID_PATHS: /raids               # path INSIDE the container (do not change; change RAID_HOST_PATH)
+      STATS_NET_INTERFACES: ${STATS_NET_INTERFACES:-}   # empty = all physical network cards, or e.g. enp3s0
+      STATS_TOKEN: ${STATS_TOKEN:-}          # empty = no password; otherwise use stats.php?key=<token>
+      STATS_HOSTNAME: ${STATS_HOSTNAME:-}    # empty = the server's own name
+    volumes:
+      - type: bind
+        source: ${RAID_HOST_PATH:-/raids}    # where the RAID is mounted ON THE SERVER
+        target: /raids
+        read_only: true
+        bind:
+          create_host_path: false            # wrong path = a clear error, not a silent empty folder

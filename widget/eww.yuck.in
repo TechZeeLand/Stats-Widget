@@ -157,10 +157,10 @@
 
     (weather-strip)))
 
-;; white strip: sunrise + sunset  ->  (hover)  humidity + rain chance + wind
+;; strip, centred under the weather block: sunrise + sunset  ->  (hover)  humidity + rain chance + wind
 (defwidget weather-strip []
   (box :halign "start" :valign "start" :style "margin-top: {{y:112}}px;"
-    (eventbox :width {{x:251}} :height {{y:20}} :class "wx-strip"
+    (eventbox :width {{x:260}} :height {{y:20}} :class "wx-strip"
               :onhover "${EWW_CMD} update wx_hover=true"
               :onhoverlost "${EWW_CMD} update wx_hover=false"
       (stack :selected {wx_hover ? 1 : 0} :transition "slideup" :same-size true

@@ -33,6 +33,37 @@ if (is_file(__DIR__ . '/stats.config.php')) {
         $CONFIG = array_replace($CONFIG, $user);
     }
 }
+// Environment variables win over the file (handy in Docker / Portainer, where no config file is mounted):
+//   STATS_PROC_ROOT, STATS_SYS_ROOT, STATS_MOUNTS_FILE, STATS_SYSTEM_PATH, STATS_HOSTNAME, STATS_TOKEN, STATS_ALLOW_ORIGIN,
+//   STATS_RAID_PATHS and STATS_NET_INTERFACES (comma separated), STATS_AUTO_DETECT (0/1), STATS_CPU_SAMPLE_MS
+foreach ([
+    'STATS_PROC_ROOT'      => ['proc_root', 'str'],
+    'STATS_SYS_ROOT'       => ['sys_root', 'str'],
+    'STATS_MOUNTS_FILE'    => ['mounts_file', 'str'],
+    'STATS_SYSTEM_PATH'    => ['system_path', 'str'],
+    'STATS_HOSTNAME'       => ['hostname', 'str'],
+    'STATS_TOKEN'          => ['token', 'str'],
+    'STATS_ALLOW_ORIGIN'   => ['allow_origin', 'str'],
+    'STATS_RAID_PATHS'     => ['raid_paths', 'list'],
+    'STATS_NET_INTERFACES' => ['net_interfaces', 'list'],
+    'STATS_AUTO_DETECT'    => ['auto_detect', 'bool'],
+    'STATS_CPU_SAMPLE_MS'  => ['cpu_sample_ms', 'int'],
+] as $envName => [$key, $type]) {
+    $raw = getenv($envName);
+    if ($raw === false || trim($raw) === '') {
+        continue;                       // unset or empty = keep the default
+    }
+    $raw = trim($raw);
+    if ($type === 'list') {
+        $CONFIG[$key] = array_values(array_filter(array_map('trim', explode(',', $raw)), 'strlen'));
+    } elseif ($type === 'bool') {
+        $CONFIG[$key] = !in_array(strtolower($raw), ['0', 'false', 'no', 'off'], true);
+    } elseif ($type === 'int') {
+        $CONFIG[$key] = (int)$raw;
+    } else {
+        $CONFIG[$key] = $raw;
+    }
+}
 
 @ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -331,8 +362,8 @@ if (isset($_GET['debug'])) {
         $diag['paths'][$p] = $e ?? 'ok';
     }
     if ($diag['in_docker']) {
-        $diag['hints'][] = 'Running in Docker: the RAID must be mounted INTO this container (-v /raids:/raids:ro, left side = where it is mounted on the host). '
-            . 'Optional: for host-wide mounts/network also mount /proc (-v /proc:/host/proc:ro) and set proc_root to /host/proc in stats.config.php.';
+        $diag['hints'][] = 'Running in Docker: the RAID must be mounted INTO this container (volume /your/host/raid:/raids:ro, see docs/SERVER_SETUP.md). '
+            . 'Optional: for host-wide mounts also mount /proc (-v /proc:/host/proc:ro) and set STATS_PROC_ROOT=/host/proc.';
     }
     if (in_array('PHP cannot read the size (permissions or open_basedir)', $diag['paths'], true)) {
         $diag['hints'][] = 'Give the web-server user execute (x) permission on every parent folder of the RAID mount, and check open_basedir.';
