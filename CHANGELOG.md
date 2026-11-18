@@ -5,6 +5,7 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 ### Added
 - Server column shows the **server CPU name** (e.g. "Intel Core i3-6100") as the title of the *CPU & Memory* bar, like the PC column; `stats.php` returns `cpu_name`.
 ### Fixed
+- Portainer *Pull and redeploy* failed with "pull access denied for stats-widget-server": the compose file no longer names a pullable image (`pull_policy: build`).
 - The RAID row no longer repeats the system disk. `stats.php` compares the candidate pool with the system path (device id, mount source device, identical size and free space - the last one catches Docker bind mounts) and reports `raid.present: false`; the widget then shows no RAID row. Real `/dev/mdN` arrays are never treated as the system disk.
 - Debug page (`?debug=1`) says when a configured RAID path is the same disk as the system path.
 

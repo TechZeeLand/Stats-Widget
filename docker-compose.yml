@@ -6,7 +6,9 @@ services:
   stats:
     build:
       context: ./server
-    image: stats-widget-server:latest
+    # No "image:" name on purpose: with one, Portainer's "Pull and redeploy" tries to download it from
+    # Docker Hub and fails ("pull access denied"). Without it, the image is only ever built locally.
+    pull_policy: build
     container_name: stats-widget-server
     network_mode: host                       # real network-card counters; listens on the host's STATS_PORT
     restart: unless-stopped

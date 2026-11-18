@@ -104,7 +104,7 @@ Once the widget shows the right numbers, delete the old file you found in step 2
 `stats.config.php` next to it and old PHP-specific `location` rules. Nothing else from the old setup is needed.
 
 ### Updating later
-Portainer: **Stacks -> stats-widget -> Pull and redeploy**, with *Re-build image* switched on.
+Portainer: **Stacks -> stats-widget -> Pull and redeploy**, with *Re-build image* switched on and *Re-pull image* switched off (the image is built from the repository, there is nothing to pull).
 
 ### Without Portainer
 ```bash
