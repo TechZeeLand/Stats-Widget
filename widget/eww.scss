@@ -52,8 +52,8 @@ $font:     "Alata", sans-serif;
 
 .minibar {
   background-color: $fg;
-  margin-top: sy(4);
-  margin-bottom: sy(4);
+  margin-top: sy(10);
+  margin-bottom: sy(10);
 }
 .minibar-text {
   color: $on-light;
@@ -67,7 +67,7 @@ $font:     "Alata", sans-serif;
 }
 .row {
   min-height: sy(21);
-  padding: 0 sx(13) 0 sx(11);
+  padding: 0 sx(10) 0 sx(10);
 }
 .row-name, .row-val {
   color: $fg;
@@ -108,6 +108,7 @@ $font:     "Alata", sans-serif;
   font-size: sf(80);
   font-weight: 600;
   color: $fg;
+  margin-bottom: sy(10);
 }
 // the white tab with the seconds, sitting on top of the divider line
 .sec-box {
@@ -123,7 +124,7 @@ $font:     "Alata", sans-serif;
   font-size: sf(11);
   letter-spacing: 1.5px * $sf;
   color: rgba(255, 255, 255, 0.55);
-  margin-bottom: sy(60);
+  margin-bottom: sy(10);
 }
 .divider {
   background-color: $fg;
