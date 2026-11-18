@@ -44,6 +44,8 @@ The usual causes:
 | systemd hardening (`ProtectSystem=strict`, `PrivateTmp`, `ProtectHome`) in the php-fpm unit | `systemctl edit php8.x-fpm` and allow `ReadOnlyPaths=/raids`, or relax the options |
 | The RAID is mounted somewhere else | set `raid_paths` (or leave it: with `auto_detect` mdadm / ZFS / btrfs / mergerfs mounts are found automatically) |
 
+**No RAID?** If the folder you point at is on the same disk as the system (for example a plain `/raids` directory), `stats.php` detects that and the widget simply hides the RAID row - nothing to configure.
+
 RAID **health** (healthy / degraded / rebuilding x %) comes from `/proc/mdstat` and works for mdadm arrays (`md0`…).
 ZFS, btrfs and mergerfs pools show their capacity but no mdadm health.
 

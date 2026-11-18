@@ -96,7 +96,7 @@
       (row :name "Uptime:"       :val {server.uptime})
       (row :name "Load average:" :val {server.load}))
 
-    (minibar :text "CPU & Memory")
+    (minibar :text {server.cpu_name != "" ? server.cpu_name : "CPU & Memory"})
     (box :class "rows" :orientation "v" :space-evenly false
       (barrow :name "CPU:"  :val {server.cpu} :pct {server.cpu_p})
       (row    :name "Temperature:" :val {server.temp})
@@ -106,8 +106,9 @@
     (minibar :text "Storage")
     (box :class "rows" :orientation "v" :space-evenly false
       (barrow :name "System:" :val {server.ssd} :pct {server.ssd_p})
-      (barrow :name "${server.raid_name}:" :val {server.raid} :pct {server.raid_p})
-      (rowc   :name "Status:" :val {server.raid_status} :vclass {server.raid_cls}))
+      (box :orientation "v" :space-evenly false :visible {server.has_raid}
+        (barrow :name "${server.raid_name}:" :val {server.raid} :pct {server.raid_p})
+        (rowc   :name "Status:" :val {server.raid_status} :vclass {server.raid_cls})))
 
     (minibar :text "Network")
     (box :class "rows" :orientation "v" :space-evenly false

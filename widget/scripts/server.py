@@ -44,6 +44,8 @@ def fetch(url, token, timeout):
 
 def raid_status(raid, ok):
     """-> (text, css-class) for the RAID health line."""
+    if isinstance(raid, dict) and raid.get("present") is False and not raid.get("arrays"):
+        return "No RAID", "ok"                      # server says: nothing separate from the system disk
     if not isinstance(raid, dict) or not ok:
         err = raid.get("error") if isinstance(raid, dict) else None
         return ("Not reachable" if err else "No data"), "bad"
@@ -73,6 +75,8 @@ def build(data, via, host_addr, speed, raid_label):
     raid = data.get("raid") if isinstance(data, dict) else None
     raid_ok = bool(raid.get("ok")) if isinstance(raid, dict) else num(f.get("raid_t")) > 0
     rtext, rcls = raid_status(raid, raid_ok)
+    # hide the RAID row only when the server explicitly reports that no separate pool exists
+    has_raid = not (isinstance(raid, dict) and raid.get("present") is False and not raid.get("arrays"))
     load = data.get("load") if isinstance(data, dict) else None
     swap_t = num(f.get("swap_t"))
     return {
@@ -85,6 +89,8 @@ def build(data, via, host_addr, speed, raid_label):
         "ram": size_pair(num(f.get("ram_u")), ram_t), "ram_p": num(f.get("ram_p")),
         "swap": size_pair(num(f.get("swap_u")), swap_t) if swap_t > 0 else "None",
         "ssd": size_pair(num(f.get("ssd_u")), num(f.get("ssd_t"))), "ssd_p": num(f.get("ssd_p")),
+        "cpu_name": str(f.get("cpu_name") or "")[:60],
+        "has_raid": has_raid,
         "raid_name": raid_label,
         "raid": size_pair(num(f.get("raid_u")), num(f.get("raid_t"))) if raid_ok else "N/A",
         "raid_p": num(f.get("raid_p")) if raid_ok else 0,
@@ -101,7 +107,7 @@ def main():
     retry = max(5, int(cfg["retry_primary"]))
     na = "N/A"
     offline = {"ok": False, "title": "Server offline", "uptime": na, "load": na, "cpu": na, "cpu_p": 0,
-               "temp": na, "ram": na, "ram_p": 0, "swap": na, "ssd": na, "ssd_p": 0,
+               "temp": na, "cpu_name": "", "has_raid": True, "ram": na, "ram_p": 0, "swap": na, "ssd": na, "ssd_p": 0,
                "raid_name": cfg["raid_label"], "raid": na, "raid_p": 0, "raid_status": "Offline",
                "raid_cls": "bad", "down": na, "up": na}
     active, last_probe, prev = None, 0.0, None      # prev = (time, rx, tx)

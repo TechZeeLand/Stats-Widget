@@ -1,6 +1,13 @@
 # Changelog
 All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com), versioning: [SemVer](https://semver.org).
 
+## [Unreleased]
+### Added
+- Server column shows the **server CPU name** (e.g. "Intel Core i3-6100") as the title of the *CPU & Memory* bar, like the PC column; `stats.php` returns `cpu_name`.
+### Fixed
+- The RAID row no longer repeats the system disk. `stats.php` compares the candidate pool with the system path (device id, mount source device, identical size and free space - the last one catches Docker bind mounts) and reports `raid.present: false`; the widget then shows no RAID row. Real `/dev/mdN` arrays are never treated as the system disk.
+- Debug page (`?debug=1`) says when a configured RAID path is the same disk as the system path.
+
 ## [0.3.0] - 2026-11-17
 ### Added
 - **Resizable widget**: size (50 %-300 %) in `stats-widget config` → *Look & Size*, or `stats-widget size 120%` / `1000x600` / `reset`. The default stays 795 × 475; all text, icons and spacing scale with it.

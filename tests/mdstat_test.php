@@ -24,4 +24,22 @@ check($a[0]['health'] === 'syncing', 'resync of a complete array is "syncing", n
 
 check(parse_mdstat(null) === [] && parse_mdstat("Personalities :\nunused devices: <none>\n") === [], 'no arrays');
 check(pct(1, 4) === 25.0 && pct(1, 0) === 0.0, 'pct() and division by zero');
+
+// CPU name cleaning
+check(clean_cpu_name('Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz') === 'Intel Core i5-8250U', 'cpu name: Intel');
+check(clean_cpu_name('AMD Ryzen 5 5600G with Radeon Graphics') === 'AMD Ryzen 5 5600G', 'cpu name: AMD');
+check(clean_cpu_name('') === '', 'cpu name: empty');
+
+// RAID row must never repeat the system disk
+$mounts = [
+    ['dev' => 'overlay',        'mount' => '/',      'fs' => 'overlay'],
+    ['dev' => '/dev/nvme0n1p2', 'mount' => '/raids', 'fs' => 'ext4'],
+    ['dev' => '/dev/md0',       'mount' => '/pool',  'fs' => 'ext4'],
+];
+check(mount_for('/raids/sub', $mounts)['mount'] === '/raids', 'mount_for: longest prefix');
+check(mount_for('/raidsX', $mounts)['mount'] === '/', 'mount_for: no false prefix match');
+check(is_system_disk('/pool', '/', $mounts) === false, 'a /dev/md mount is never the system disk');
+check(is_system_disk('/tmp', '/tmp', $mounts) === true, 'same path = same disk');
+$sys = [['dev' => '/dev/nvme0n1p2', 'mount' => '/', 'fs' => 'ext4'], ['dev' => '/dev/nvme0n1p2', 'mount' => '/raids', 'fs' => 'ext4']];
+check(is_system_disk('/raids', '/', $sys) === true, 'bind mount of the same source device is the system disk');
 echo "all PHP tests passed\n";

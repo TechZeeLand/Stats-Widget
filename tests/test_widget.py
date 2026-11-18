@@ -115,6 +115,30 @@ class ServerLogicTests(unittest.TestCase):
         self.assertEqual(out["uptime"], "1d 1h 1m")
 
 
+class RaidAndCpuNameTests(unittest.TestCase):
+    def setUp(self):
+        import server
+        self.server = server
+
+    def test_no_separate_pool_hides_raid_row(self):
+        data = {"cpu": 1, "ram_t": 8, "cpu_name": "Intel Core i3-6100", "raid_u": 0, "raid_t": 0, "raid_p": 0,
+                "raid": {"present": False, "ok": False, "error": "same disk", "arrays": []}}
+        out = self.server.build(data, "Home", "h", (0, 0), "RAID")
+        self.assertFalse(out["has_raid"])
+        self.assertEqual(out["raid_status"], "No RAID")
+        self.assertEqual(out["cpu_name"], "Intel Core i3-6100")
+
+    def test_old_server_keeps_raid_row(self):
+        out = self.server.build({"cpu": 1, "ram_t": 8, "raid_t": 100, "raid_u": 1, "raid_p": 1}, "Home", "h", (0, 0), "RAID")
+        self.assertTrue(out["has_raid"])
+        self.assertEqual(out["cpu_name"], "")
+
+    def test_real_array_keeps_row(self):
+        raid = {"present": True, "ok": True, "arrays": [{"name": "md0", "level": "raid1", "devices": 2, "working": 2, "health": "ok"}]}
+        out = self.server.build({"ram_t": 8, "raid_t": 1000, "raid_u": 1, "raid": raid}, "Home", "h", (0, 0), "RAID")
+        self.assertTrue(out["has_raid"])
+
+
 class CalendarWeatherTests(unittest.TestCase):
     def test_calendar_shape_and_today(self):
         import calendar_grid

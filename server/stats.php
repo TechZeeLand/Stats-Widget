@@ -163,6 +163,26 @@ function cpu_temperature(string $sys): float
     return 0.0;
 }
 
+// ───────────────────────── CPU NAME ─────────────────────────
+/** "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz" -> "Intel Core i5-8250U" (host CPU, also inside Docker). */
+function clean_cpu_name(string $model): string
+{
+    $model = preg_replace('/\((?:R|TM|r|tm)\)/', '', $model) ?? $model;
+    $model = preg_replace('/@.*$/', '', $model) ?? $model;
+    $model = preg_replace('/\b\d+(?:st|nd|rd|th) Gen\b/', '', $model) ?? $model;
+    $model = preg_replace('/\b(?:CPU|Processor|\d+-Core)\b/', '', $model) ?? $model;
+    $model = preg_replace('/\bwith Radeon.*$/', '', $model) ?? $model;
+    return trim((string)preg_replace('/\s+/', ' ', $model), " ,");
+}
+
+function cpu_name(string $proc): string
+{
+    if (preg_match('/^model name\s*:\s*(.+)$/m', (string)slurp("$proc/cpuinfo"), $m)) {
+        return clean_cpu_name($m[1]);
+    }
+    return '';   // ARM boards etc. have no "model name" line
+}
+
 // ───────────────────────── MEMORY / LOAD / UPTIME ─────────────────────────
 function meminfo(string $proc): array
 {
@@ -260,6 +280,57 @@ function real_disks(array $mounts): array
     return array_slice($res, 0, 8);
 }
 
+/** Exact byte sizes of the filesystem at $path -> [total, free] or null. */
+function disk_bytes(string $path): ?array
+{
+    $total = @disk_total_space($path);
+    $free  = @disk_free_space($path);
+    return ($total === false || $free === false || $total <= 0) ? null : [(float)$total, (float)$free];
+}
+
+/** The mount-table entry that contains $path (longest matching mount point). */
+function mount_for(string $path, array $mounts): ?array
+{
+    $best = null;
+    foreach ($mounts as $m) {
+        $mp = rtrim($m['mount'], '/');
+        if ($path === $m['mount'] || $mp === '' || strpos($path . '/', $mp . '/') === 0) {
+            if ($best === null || strlen($m['mount']) > strlen($best['mount'])) {
+                $best = $m;
+            }
+        }
+    }
+    return $best;
+}
+
+/**
+ * True when $path is the very same filesystem as the system disk, so a "RAID" row would only repeat it.
+ * Three independent checks, because in Docker "/" is an overlay while a bind-mounted folder shows the real
+ * device underneath (so st_dev differs even though both are the same SSD):
+ *   1. same st_dev;  2. same source device in the mount table;  3. identical total size and free space (+-0.5 %).
+ * A real md array (/dev/mdN) is never treated as the system disk.
+ */
+function is_system_disk(string $path, string $system, array $mounts): bool
+{
+    $entry = mount_for($path, $mounts);
+    if ($entry !== null && strpos($entry['dev'], '/dev/md') === 0) {
+        return false;
+    }
+    $a = @stat($path);
+    $b = @stat($system);
+    if ($a && $b && $a['dev'] === $b['dev']) {
+        return true;
+    }
+    $sysEntry = mount_for($system, $mounts);
+    if ($entry !== null && $sysEntry !== null && strpos($entry['dev'], '/dev/') === 0 && $entry['dev'] === $sysEntry['dev']) {
+        return true;
+    }
+    $x = disk_bytes($path);
+    $y = disk_bytes($system);
+    return $x !== null && $y !== null && abs($x[0] - $y[0]) / $y[0] < 0.005
+        && abs($x[1] - $y[1]) / $y[0] < 0.005;
+}
+
 // ───────────────────────── NETWORK ─────────────────────────
 function network(array $c): array
 {
@@ -295,6 +366,7 @@ function collect(array $c): array
         'load'     => array_map('floatval', array_slice(explode(' ', (string)slurp("$proc/loadavg")), 0, 3)),
         'cpu'      => cpu_percent($proc, (int)$c['cpu_sample_ms']),
         'temp'     => cpu_temperature($c['sys_root']),
+        'cpu_name' => cpu_name($proc),
     ];
     $out += meminfo($proc);
 
@@ -309,14 +381,16 @@ function collect(array $c): array
         [$du, $dt, $derr] = disk_usage($m['mount']);
         if ($derr === null) {
             $disks[] = ['mount' => $m['mount'], 'dev' => $m['dev'], 'fs' => $m['fs'],
-                        'used' => $du, 'total' => $dt, 'percent' => pct($du, $dt), 'array' => is_array_mount($m)];
+                        'used' => $du, 'total' => $dt, 'percent' => pct($du, $dt), 'array' => is_array_mount($m),
+                        'system' => $m['mount'] === $c['system_path'] || is_system_disk($m['mount'], $c['system_path'], $mounts)];
         }
     }
-    $raid = ['path' => null, 'ok' => false, 'error' => null, 'arrays' => parse_mdstat(slurp("$proc/mdstat"))];
+    $raid = ['path' => null, 'ok' => false, 'present' => false, 'error' => null, 'arrays' => parse_mdstat(slurp("$proc/mdstat"))];
     $candidates = $c['raid_paths'];
     if ($c['auto_detect']) {
         foreach ($mounts as $m) {
-            if (is_array_mount($m) && !in_array($m['mount'], $candidates, true) && !preg_match('#^/(boot|run|var/lib)#', $m['mount'])) {
+            if (is_array_mount($m) && !in_array($m['mount'], $candidates, true) && $m['mount'] !== $c['system_path']
+                && !preg_match('#^/(boot|run|var/lib)#', $m['mount'])) {
                 $candidates[] = $m['mount'];
             }
         }
@@ -324,9 +398,14 @@ function collect(array $c): array
     $errors = [];
     foreach ($candidates as $path) {
         [$ru, $rt, $rerr] = disk_usage($path);
+        if ($rerr === null && is_system_disk($path, $c['system_path'], $mounts)) {
+            $errors[] = "$path: same disk as the system path (no separate RAID/pool there)";
+            continue;
+        }
         if ($rerr === null) {
             $raid['path'] = $path;
             $raid['ok'] = true;
+            $raid['present'] = true;
             $out += ['raid_u' => $ru, 'raid_t' => $rt, 'raid_p' => pct($ru, $rt)];
             break;
         }
@@ -334,6 +413,7 @@ function collect(array $c): array
     }
     if (!$raid['ok']) {
         $raid['error'] = $errors ? implode('; ', $errors) : 'no RAID path configured or detected';
+        $raid['present'] = false;
         $out += ['raid_u' => 0, 'raid_t' => 0, 'raid_p' => 0];
     }
     $out['raid']  = $raid;
@@ -357,10 +437,17 @@ if (isset($_GET['debug'])) {
         'paths'        => [],
         'hints'        => [],
     ];
+    $dbgMounts = read_mounts($CONFIG);
     foreach (array_merge([$CONFIG['system_path']], $CONFIG['raid_paths']) as $p) {
         [, , $e] = disk_usage($p);
         $diag['paths'][$p] = $e ?? 'ok';
+        if ($e === null && $p !== $CONFIG['system_path'] && is_system_disk($p, $CONFIG['system_path'], $dbgMounts)) {
+            $diag['paths'][$p] = 'ok, but this is the SAME disk as the system path - it is not shown as RAID';
+            $diag['hints'][] = "$p is on the system disk. There is no separate RAID/pool here, so the widget hides the RAID row by itself; "
+                . 'if you do have one, mount the real pool into the container.';
+        }
     }
+    $diag['cpu_name'] = cpu_name($CONFIG['proc_root']);
     if ($diag['in_docker']) {
         $diag['hints'][] = 'Running in Docker: the RAID must be mounted INTO this container (volume /your/host/raid:/raids:ro, see docs/SERVER_SETUP.md). '
             . 'Optional: for host-wide mounts also mount /proc (-v /proc:/host/proc:ro) and set STATS_PROC_ROOT=/host/proc.';
