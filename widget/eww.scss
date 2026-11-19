@@ -109,7 +109,7 @@ $font:     "Alata", sans-serif;
   font-size: sf(80);
   font-weight: 600;
   color: $fg;
-  margin-bottom: sy(20);
+  margin-bottom: sy(22);
 }
 // the white tab with the seconds, sitting on top of the divider line
 .sec-box {
@@ -125,7 +125,7 @@ $font:     "Alata", sans-serif;
   font-size: sf(11);
   letter-spacing: 1.5px * $sf;
   color: rgba(255, 255, 255, 0.55);
-  margin-bottom: sy(18);
+  margin-bottom: sy(20);
 }
 .divider {
   background-color: $fg;
