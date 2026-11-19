@@ -3,6 +3,16 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ## [Unreleased]
 ### Added
+- **Everything in the Server column is configurable in `stats-widget config`** (new *Server rows* tab): show/hide uptime, CPU, clock, temperature, RAM, swap, network and system disk; server name, system-disk name/path, network cards; extra storage rows by mount point with your own names, or automatic (every separate disk / RAID / pool the server reports, up to a limit). No RAID, one RAID or several - nothing to edit on the server any more. `stats.php` now lists all disks (`disks`, with the mdadm array name) and accepts `?system=` / `?net=` from the widget (only known mount points / NIC names; `allow_client_settings` turns it off).
+- **Configurable weekend and first day of the week** (`[general] weekend`, `week_start`, and *Calendar* tab). Default stays Fri + Sat, weeks start on Sunday. The weekday header follows.
+- **CPU clock speed** (average over all cores) in the PC column and, from `stats.php` (`cpu_mhz`), in the Server column - it replaces *Load average*.
+- PC column: **VRAM row only on graphics cards with their own memory** (NVIDIA, discrete AMD). Intel / APU graphics no longer show a VRAM or "Shared" line. The GPU *Clock* row is now always shown (before, VRAM replaced it).
+### Changed
+- *Load average* is gone from the widget (`stats.php` still reports `load` and `cores`).
+- The Server column is built from a list of rows sent by `scripts/server.py`; the layout no longer hard-codes them.
+### Fixed
+- NVIDIA: one unreadable value (`[N/A]` from `nvidia-smi`) blanked the whole GPU block; each value is now read on its own.
+- `stats.php`: CPU core count read `/proc/cpuinfo` twice and relied on a fragile newline test.
 - Server column shows the **server CPU name** (e.g. "Intel Core i3-6100") as the title of the *CPU & Memory* bar, like the PC column; `stats.php` returns `cpu_name`.
 ### Fixed
 - Portainer *Pull and redeploy* failed with "pull access denied for stats-widget-server": the compose file no longer names a pullable image (`pull_policy: build`).

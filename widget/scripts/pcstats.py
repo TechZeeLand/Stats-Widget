@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import time
 
-from common import duration, emit, fmt, size_pair
+from common import clock_text, duration, emit, fmt, size_pair
 
 NA = "N/A"
 GIB = 1024 ** 3
@@ -48,6 +48,25 @@ def cpu_title():
     model = re.sub(r"\s+", " ", model).strip(" ,") or "CPU"
     khz = read_int("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
     return f"{model}, {khz / 1e6:.1f}GHz" if khz else model
+
+
+def cpu_clock_mhz(sys_root="/sys", proc_root="/proc"):
+    """Current CPU clock in MHz: the average over all cores (like HWiNFO's "average effective clock").
+    Uses cpufreq when the kernel offers it, otherwise the "cpu MHz" lines of /proc/cpuinfo."""
+    vals = []
+    for path in glob.glob(f"{sys_root}/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"):
+        khz = read_int(path)
+        if khz and khz > 0:
+            vals.append(khz / 1000)
+    if not vals:
+        for line in (read(f"{proc_root}/cpuinfo", "") or "").splitlines():
+            if line.startswith("cpu MHz"):
+                try:
+                    vals.append(float(line.split(":", 1)[1]))
+                except ValueError:
+                    pass
+    vals = [v for v in vals if v > 0]
+    return sum(vals) / len(vals) if vals else None
 
 
 def cpu_times():
@@ -122,7 +141,8 @@ class GPU:
         self.last_rc6 = None  # (timestamp, residency_ms) for Intel utilisation
 
     def stats(self):
-        out = {"use": NA, "temp": NA, "vram": NA, "clock": NA}
+        # "vram" stays None for GPUs that have no memory of their own (Intel iGPU, AMD APU): the widget then hides the row
+        out = {"use": NA, "temp": NA, "vram": None, "clock": NA}
         if not self.card:
             return out
         dev = self.card + "/device"
@@ -135,13 +155,23 @@ class GPU:
         return out
 
     @staticmethod
+    def amd_has_dedicated_vram(dev):
+        """True for a graphics card with its own memory, False for an APU that borrows system RAM.
+        amdgpu names the memory maker only on real cards; as a fallback, 2 GB or more counts as dedicated."""
+        total = read_int(dev + "/mem_info_vram_total") or 0
+        maker = (read(dev + "/mem_info_vram_vendor", "") or "").strip().lower()
+        if maker and maker != "unknown":
+            return total > 0
+        return total >= 2 * GIB
+
+    @staticmethod
     def _amd(dev, out):
         busy = read_int(dev + "/gpu_busy_percent")
         if busy is not None:
             out["use"] = f"{busy}%"
-        used, total = read_int(dev + "/mem_info_vram_used"), read_int(dev + "/mem_info_vram_total")
-        if used is not None and total:
-            out["vram"] = f"{used / GIB:.2f} GB / {fmt(total / GIB, 0)} GB"
+        if GPU.amd_has_dedicated_vram(dev):
+            used, total = read_int(dev + "/mem_info_vram_used"), read_int(dev + "/mem_info_vram_total")
+            out["vram"] = f"{used / GIB:.2f} GB / {fmt(total / GIB, 0)} GB" if used is not None and total else NA
         for hw in glob.glob(dev + "/hwmon/hwmon*"):
             t = read_int(hw + "/temp1_input")
             if t is not None:
@@ -153,6 +183,7 @@ class GPU:
 
     @staticmethod
     def _nvidia(dev, out):
+        out["vram"] = NA                       # NVIDIA cards have their own memory
         # Don't poke a sleeping laptop dGPU - it would wake it up and drain the battery.
         if read(dev + "/power/runtime_status") == "suspended":
             out.update(use="Asleep", temp="Asleep", vram="Asleep", clock="Asleep")
@@ -164,14 +195,24 @@ class GPU:
                 ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total,clocks.gr",
                  "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=3).stdout.strip()
             use, temp, used, total, clock = [x.strip() for x in line.splitlines()[0].split(",")]
-            out.update(use=f"{use}%", temp=f"{temp}°C",
-                       vram=f"{int(used) / 1024:.2f} GB / {fmt(int(total) / 1024, 0)} GB",
-                       clock=f"{clock} MHz")
         except Exception:
-            pass
+            return
+
+        def number(text):                      # nvidia-smi prints "[N/A]" for what a card can't report
+            try:
+                return float(text)
+            except ValueError:
+                return None
+        if number(use) is not None:
+            out["use"] = f"{number(use):.0f}%"
+        if number(temp) is not None:
+            out["temp"] = f"{number(temp):.0f}°C"
+        if number(used) is not None and number(total):
+            out["vram"] = f"{number(used) / 1024:.2f} GB / {fmt(number(total) / 1024, 0)} GB"
+        if number(clock) is not None:
+            out["clock"] = f"{number(clock):.0f} MHz"
 
     def _intel(self, out):
-        out["vram"] = "Shared"
         base = self.card
         for p in (base + "/gt_cur_freq_mhz", base + "/gt/gt0/rps_cur_freq_mhz",
                   base + "/device/tile0/gt0/freq0/cur_freq"):
@@ -258,17 +299,17 @@ def main():
         ram, ram_p = ram_info()
         disk, disk_p = disk_info("/")
         bat, _ = battery()
-        # third GPU row: VRAM when the card has its own, otherwise the clock speed
-        row3 = ("VRAM:", g["vram"]) if g["vram"] not in (NA, "Shared") else ("Clock:", g["clock"])
         uptime = duration(float((read("/proc/uptime", "0") or "0").split()[0]))
         emit({
             "cpu_title": cpu_name,
             "cpu_use": f"{usage:.0f}%", "cpu_p": round(usage),
+            "cpu_clock": clock_text(cpu_clock_mhz()),
             "cpu_temp": f"{temp_raw / 1000:.0f}°C" if temp_raw is not None else NA,
             "uptime": uptime,
             "gpu_title": gpu.title,
             "gpu_use": g["use"], "gpu_temp": g["temp"],
-            "gpu_row3_name": row3[0], "gpu_row3": row3[1],
+            "gpu_clock": g["clock"],
+            "has_vram": g["vram"] is not None, "gpu_vram": g["vram"] or "",
             "ram": ram, "ram_p": round(ram_p),
             "disk": disk, "disk_p": round(disk_p),
             "has_battery": bool(bat), "battery": bat,

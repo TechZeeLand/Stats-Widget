@@ -44,6 +44,8 @@ The usual causes:
 | systemd hardening (`ProtectSystem=strict`, `PrivateTmp`, `ProtectHome`) in the php-fpm unit | `systemctl edit php8.x-fpm` and allow `ReadOnlyPaths=/raids`, or relax the options |
 | The RAID is mounted somewhere else | set `raid_paths` (or leave it: with `auto_detect` mdadm / ZFS / btrfs / mergerfs mounts are found automatically) |
 
+**Which disks the widget shows is chosen in the widget** (`stats-widget config` → *Server rows*), not here: `stats.php` reports every disk it can see and the widget picks. `raid_paths` only matters for very old widgets.
+
 **No RAID?** If the folder you point at is on the same disk as the system (for example a plain `/raids` directory), `stats.php` detects that and the widget simply hides the RAID row - nothing to configure.
 
 RAID **health** (healthy / degraded / rebuilding x %) comes from `/proc/mdstat` and works for mdadm arrays (`md0`…).
@@ -119,7 +121,7 @@ and consider the `token` option. If it must be reachable remotely, serve it only
 
 ## 6. The JSON
 ```jsonc
-{ "version":2, "host":"rayaz", "uptime":1234567, "load":[0.42,0.37,0.31], "cores":12,
+{ "version":2, "host":"rayaz", "uptime":1234567, "load":[0.42,0.37,0.31], "cores":12, "cpu_mhz":2893,
   "cpu":18.4, "temp":47.5,
   "ram_u":9.6, "ram_t":31.2, "ram_p":30.8, "swap_u":0.1, "swap_t":4, "swap_p":2.5,
   "ssd_u":212.4, "ssd_t":465.8, "ssd_p":45.6,

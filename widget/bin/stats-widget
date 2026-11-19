@@ -74,8 +74,8 @@ s = common.load_config()["server"]
 for i, u in enumerate(s["urls"]):
     try:
         d = server.fetch(u, s["token"], float(s["timeout"]))
-        raid = d.get("raid", {}) if isinstance(d, dict) else {}
-        extra = "" if raid.get("ok", True) else f"  (RAID: {raid.get('error')})"
+        disks = d.get("disks") if isinstance(d, dict) else None
+        extra = f"  ({len(disks)} disks reported)" if isinstance(disks, list) else "  (old stats.php: update it to choose storage rows and see the CPU clock)"
         print(f"    \033[32m✓\033[0m {u}  host={d.get('host','?')}{extra}")
     except Exception as e:
         print(f"    \033[31m✗\033[0m {u}  {getattr(e,'reason',e)}")

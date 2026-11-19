@@ -38,13 +38,13 @@ Every installer lives in [`distros/`](distros) and is a few readable lines.
 
 | Column | Shows |
 |---|---|
-| **Server Stats** | hostname + which address is in use, uptime, load, CPU %, temperature, RAM, swap, system disk, **RAID / storage pool with health** (mdadm degraded / rebuilding), network speed |
-| **Middle** | big clock with seconds and date, weather (Open-Meteo, no API key) with sunrise/sunset - hover for humidity, rain chance and wind - and a month calendar (Fri/Sat weekend) |
-| **PC Stats** | this computer: CPU (name auto-detected), temperature, uptime, GPU (AMD / NVIDIA / Intel), RAM, disk, battery, network |
+| **Server Stats** | hostname + which address is in use, uptime, CPU %, **CPU clock speed**, temperature, RAM, swap, system disk, **any extra disks / RAID / pools with health** (mdadm degraded / rebuilding), network speed - every row can be hidden or renamed in the settings |
+| **Middle** | big clock with seconds and date, weather (Open-Meteo, no API key) with sunrise/sunset - hover for humidity, rain chance and wind - and a month calendar (weekend days and first weekday configurable, default Fri/Sat) |
+| **PC Stats** | this computer: CPU (name auto-detected, **current clock speed**), temperature, uptime, GPU (AMD / NVIDIA / Intel; **VRAM** on cards that have their own), RAM, disk, battery, network |
 
 * **Automatic failover** - uses `http://192.168.0.123/stats.php` at home; when that is unreachable it switches to
   `http://rayaz.netbird.cloud/stats.php`, and back again by itself. Fully configurable.
-* **Settings window** - `stats-widget config`: server addresses (with a Test button), city search, 12/24 h, opacity, position and **size** (50-300 %, everything scales; or `stats-widget size 120%`).
+* **Settings window** - `stats-widget config`: server addresses (with a Test button), which server rows / disks to show, weekend days, city search, 12/24 h, opacity, position and **size** (50-300 %, everything scales; or `stats-widget size 120%`).
 * **Move it by dragging** - right-click the widget (or `stats-widget move`), drag the ghost, press Enter.
 * **Server script** - [`server/stats.php`](server/stats.php) reports everything above and explains itself when something (like a RAID mount) can not be read: `stats.php?debug=1`.
 

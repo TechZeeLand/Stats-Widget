@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent            # the widget folder (ha
 CACHE = Path.home() / ".cache" / "stats-widget"
 
 DEFAULTS = {
-    "general": {"use_24h": False},
+    "general": {"use_24h": False, "weekend": ["fri", "sat"], "week_start": "sunday"},
     "server": {
         "urls": ["http://192.168.0.123/stats.php", "http://rayaz.netbird.cloud/stats.php"],
         "labels": ["Home network", "Remote (NetBird)"],
@@ -23,7 +23,22 @@ DEFAULTS = {
         "interval": 1.0,
         "timeout": 1.5,
         "retry_primary": 20,
-        "raid_label": "RAID",
+        "name": "",                  # shown instead of the server's own hostname
+        "show_uptime": True,
+        "show_cpu": True,
+        "show_clock": True,
+        "show_temperature": True,
+        "show_ram": True,
+        "show_swap": True,
+        "show_network": True,
+        "show_system_disk": True,
+        "system_label": "System",
+        "system_path": "",           # "" = whatever the server treats as its system disk
+        "storage_paths": [],         # [] = automatic: every disk / pool that is not the system disk
+        "storage_labels": [],
+        "max_storage_rows": 3,       # automatic mode only
+        "raid_label": "RAID",        # automatic mode: name of mdadm / ZFS / btrfs / mergerfs rows
+        "net_interfaces": [],        # [] = all physical network cards on the server
     },
     "weather": {
         "display_name": "Dhaka, Bangladesh",
@@ -61,6 +76,48 @@ def widget_size(cfg):
             v = default
         out.append(max(rnd(default * MIN_SCALE), min(rnd(default * MAX_SCALE), v)))
     return tuple(out)
+
+
+# ───────────────────────── calendar week ─────────────────────────
+DAY_CODES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]        # index 0 = Monday (like datetime.weekday())
+DEFAULT_WEEKEND = [4, 5]                                              # Friday + Saturday
+DEFAULT_WEEK_START = 6                                                # Sunday
+
+
+def _day_index(value):
+    """'Fri' / 'friday' / ' FRI ' -> 4.  Anything else -> None."""
+    text = str(value).strip().lower()[:3]
+    return DAY_CODES.index(text) if text in DAY_CODES else None
+
+
+def weekend_days(cfg):
+    """Set of weekday numbers (Monday = 0) that are the weekend.
+    [] = no highlighted weekend. A list with no valid day names at all falls back to Friday + Saturday."""
+    raw = cfg.get("general", {}).get("weekend", DEFAULT_WEEKEND_NAMES)
+    if not isinstance(raw, (list, tuple)):
+        return set(DEFAULT_WEEKEND)
+    days = {i for i in (_day_index(v) for v in raw) if i is not None}
+    return days if days or not raw else set(DEFAULT_WEEKEND)
+
+
+def week_start(cfg):
+    """First column of the calendar as a weekday number (Monday = 0). Bad value -> Sunday."""
+    i = _day_index(cfg.get("general", {}).get("week_start", "sunday"))
+    return DEFAULT_WEEK_START if i is None else i
+
+
+DEFAULT_WEEKEND_NAMES = [DAY_CODES[i] for i in DEFAULT_WEEKEND]
+
+
+def clock_text(mhz):
+    """2412.7 -> '2.41 GHz', 800 -> '800 MHz', anything unusable -> 'N/A'."""
+    try:
+        mhz = float(mhz)
+    except (TypeError, ValueError):
+        return "N/A"
+    if mhz <= 0:
+        return "N/A"
+    return f"{mhz / 1000:.2f} GHz" if mhz >= 1000 else f"{mhz:.0f} MHz"
 
 
 # ───────────────────────── config file ─────────────────────────
@@ -131,6 +188,9 @@ def _val(v):
 
 def render_config(cfg):
     g, s, w, p, a = (cfg[k] for k in ("general", "server", "weather", "position", "appearance"))
+    D = DEFAULTS["server"]
+    sv = lambda key: s.get(key, D[key])                                       # noqa: E731
+    gv = lambda key: g.get(key, DEFAULTS["general"][key])                     # noqa: E731
     return f"""\
 # Stats Widget settings - https://github.com/TechZeeLand/Stats-Widget
 # Easiest way to change these:   stats-widget config      (graphical settings window)
@@ -138,6 +198,8 @@ def render_config(cfg):
 
 [general]
 use_24h = {_val(g['use_24h'])}                  # false = 3:07   true = 15:07
+weekend = {_val(gv('weekend'))}      # days drawn in red: any of "mon" "tue" "wed" "thu" "fri" "sat" "sun"  ([] = none)
+week_start = {_val(gv('week_start'))}            # first column of the calendar: "sunday", "monday", "saturday" ...
 
 [server]
 # stats.php addresses, tried in this order. The first that answers is used; while a later one is
@@ -149,7 +211,26 @@ token  = {_val(s['token'])}                      # only if you set 'token' in st
 interval      = {_val(float(s['interval']))}     # seconds between requests
 timeout       = {_val(float(s['timeout']))}      # seconds before an address is considered down
 retry_primary = {_val(int(s['retry_primary']))}  # seconds between "is home reachable again?" checks
-raid_label    = {_val(s['raid_label'])}          # name of the storage row
+
+# What the Server column shows. Everything here is decided by the widget - nothing to edit on the server.
+name = {_val(sv('name'))}                         # shown instead of the server's own hostname ("" = hostname)
+show_uptime      = {_val(sv('show_uptime'))}
+show_cpu         = {_val(sv('show_cpu'))}
+show_clock       = {_val(sv('show_clock'))}                     # current CPU clock speed
+show_temperature = {_val(sv('show_temperature'))}
+show_ram         = {_val(sv('show_ram'))}
+show_swap        = {_val(sv('show_swap'))}
+show_network     = {_val(sv('show_network'))}
+show_system_disk = {_val(sv('show_system_disk'))}
+system_label     = {_val(sv('system_label'))}               # name of the system-disk row
+system_path      = {_val(sv('system_path'))}                      # "" = the server's own choice, or a mount point such as "/"
+# Extra storage rows. [] = automatic: every separate disk / RAID / pool the server reports (none if it has only
+# its system disk). Or list mount points as the SERVER sees them, with a name for each (same order):
+storage_paths  = {_val(sv('storage_paths'))}
+storage_labels = {_val(sv('storage_labels'))}
+max_storage_rows = {_val(int(sv('max_storage_rows')))}                  # automatic mode: how many extra disks to show at most
+raid_label       = {_val(sv('raid_label'))}                  # automatic mode: name for mdadm / ZFS / btrfs / mergerfs rows
+net_interfaces   = {_val(sv('net_interfaces'))}                       # [] = all physical network cards, or e.g. ["enp3s0"]
 
 [weather]                                         # Open-Meteo, no API key needed
 display_name    = {_val(w['display_name'])}

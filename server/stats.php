@@ -26,6 +26,7 @@ $CONFIG = [
     'cpu_sample_ms'  => 100,       // how long CPU usage is measured (50-1000)
     'token'          => '',        // non-empty = callers must add  ?key=<token>
     'allow_origin'   => '',        // CORS header, normally not needed
+    'allow_client_settings' => true, // true = the widget may choose the system disk and network cards (?system=, ?net=)
 ];
 if (is_file(__DIR__ . '/stats.config.php')) {
     $user = require __DIR__ . '/stats.config.php';
@@ -35,7 +36,8 @@ if (is_file(__DIR__ . '/stats.config.php')) {
 }
 // Environment variables win over the file (handy in Docker / Portainer, where no config file is mounted):
 //   STATS_PROC_ROOT, STATS_SYS_ROOT, STATS_MOUNTS_FILE, STATS_SYSTEM_PATH, STATS_HOSTNAME, STATS_TOKEN, STATS_ALLOW_ORIGIN,
-//   STATS_RAID_PATHS and STATS_NET_INTERFACES (comma separated), STATS_AUTO_DETECT (0/1), STATS_CPU_SAMPLE_MS
+//   STATS_RAID_PATHS and STATS_NET_INTERFACES (comma separated), STATS_AUTO_DETECT (0/1), STATS_CPU_SAMPLE_MS,
+//   STATS_ALLOW_CLIENT_SETTINGS (0/1)
 foreach ([
     'STATS_PROC_ROOT'      => ['proc_root', 'str'],
     'STATS_SYS_ROOT'       => ['sys_root', 'str'],
@@ -48,6 +50,7 @@ foreach ([
     'STATS_NET_INTERFACES' => ['net_interfaces', 'list'],
     'STATS_AUTO_DETECT'    => ['auto_detect', 'bool'],
     'STATS_CPU_SAMPLE_MS'  => ['cpu_sample_ms', 'int'],
+    'STATS_ALLOW_CLIENT_SETTINGS' => ['allow_client_settings', 'bool'],
 ] as $envName => [$key, $type]) {
     $raw = getenv($envName);
     if ($raw === false || trim($raw) === '') {
@@ -161,6 +164,29 @@ function cpu_temperature(string $sys): float
         }
     }
     return 0.0;
+}
+
+/** Current CPU clock in MHz, averaged over all cores (cpufreq when available, else "cpu MHz" in /proc/cpuinfo). 0 = unknown. */
+function cpu_clock_mhz(string $proc, string $sys): float
+{
+    $sum = 0.0;
+    $n = 0;
+    foreach (glob("$sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq") ?: [] as $file) {
+        $raw = slurp($file);
+        if ($raw !== null && (float)$raw > 0) {
+            $sum += (float)$raw / 1000;
+            $n++;
+        }
+    }
+    if ($n === 0 && preg_match_all('/^cpu MHz\s*:\s*([\d.]+)/m', (string)slurp("$proc/cpuinfo"), $m)) {
+        foreach ($m[1] as $mhz) {
+            if ((float)$mhz > 0) {
+                $sum += (float)$mhz;
+                $n++;
+            }
+        }
+    }
+    return $n > 0 ? round($sum / $n) : 0.0;
 }
 
 // ───────────────────────── CPU NAME ─────────────────────────
@@ -277,7 +303,7 @@ function real_disks(array $mounts): array
         $seen[$key] = true;
         $res[] = $m;
     }
-    return array_slice($res, 0, 8);
+    return array_slice($res, 0, 16);
 }
 
 /** Exact byte sizes of the filesystem at $path -> [total, free] or null. */
@@ -353,6 +379,33 @@ function network(array $c): array
     return ['net_rx' => $rx, 'net_tx' => $tx, 'net_iface' => implode(',', $used)];
 }
 
+// ───────────────────────── SETTINGS SENT BY THE WIDGET ─────────────────────────
+/**
+ * The widget may ask for  ?system=<mount point>  and  ?net=eth0,eth1.  Only values that exist on this server are
+ * accepted (the system path must be a mount point from the mount table), so nobody can probe arbitrary folders.
+ * Switch it off with  'allow_client_settings' => false  (or STATS_ALLOW_CLIENT_SETTINGS=0).
+ */
+function apply_client_settings(array $c, array $get): array
+{
+    if (empty($c['allow_client_settings'])) {
+        return $c;
+    }
+    $system = isset($get['system']) && is_string($get['system']) ? trim($get['system']) : '';
+    if ($system !== '') {
+        foreach (read_mounts($c) as $m) {
+            if ($m['mount'] === $system) {
+                $c['system_path'] = $system;
+                break;
+            }
+        }
+    }
+    $net = isset($get['net']) && is_string($get['net']) ? trim($get['net']) : '';
+    if ($net !== '') {
+        $c['net_interfaces'] = array_slice(array_values(array_filter(array_map('trim', explode(',', $net)), 'strlen')), 0, 8);
+    }
+    return $c;
+}
+
 // ───────────────────────── BUILD THE ANSWER ─────────────────────────
 function collect(array $c): array
 {
@@ -362,9 +415,10 @@ function collect(array $c): array
         'host'     => $c['hostname'] ?? (trim((string)slurp("$proc/sys/kernel/hostname")) ?: (string)gethostname()),
         'time'     => time(),
         'uptime'   => (int)floatval((string)slurp("$proc/uptime")),
-        'cores'    => max(1, substr_count((string)slurp("$proc/cpuinfo"), "\nprocessor") + (strncmp((string)slurp("$proc/cpuinfo"), 'processor', 9) === 0 ? 1 : 0)),
+        'cores'    => max(1, preg_match_all('/^processor\s*:/m', (string)slurp("$proc/cpuinfo"))),
         'load'     => array_map('floatval', array_slice(explode(' ', (string)slurp("$proc/loadavg")), 0, 3)),
         'cpu'      => cpu_percent($proc, (int)$c['cpu_sample_ms']),
+        'cpu_mhz'  => cpu_clock_mhz($proc, $c['sys_root']),
         'temp'     => cpu_temperature($c['sys_root']),
         'cpu_name' => cpu_name($proc),
     ];
@@ -382,6 +436,7 @@ function collect(array $c): array
         if ($derr === null) {
             $disks[] = ['mount' => $m['mount'], 'dev' => $m['dev'], 'fs' => $m['fs'],
                         'used' => $du, 'total' => $dt, 'percent' => pct($du, $dt), 'array' => is_array_mount($m),
+                        'md' => preg_match('#^/dev/(md\d+)$#', $m['dev'], $mdm) ? $mdm[1] : null,
                         'system' => $m['mount'] === $c['system_path'] || is_system_disk($m['mount'], $c['system_path'], $mounts)];
         }
     }
@@ -459,4 +514,4 @@ if (isset($_GET['debug'])) {
     exit;
 }
 
-echo json_encode(collect($CONFIG), JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+echo json_encode(collect(apply_client_settings($CONFIG, $_GET)), JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);

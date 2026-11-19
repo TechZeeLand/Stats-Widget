@@ -27,7 +27,7 @@
   "python3 scripts/clock.py")
 
 (deflisten server
-  :initial '{"ok":false,"title":"Connecting…","uptime":"N/A","load":"N/A","cpu":"N/A","cpu_p":0,"temp":"N/A","ram":"N/A","ram_p":0,"swap":"N/A","ssd":"N/A","ssd_p":0,"raid_name":"RAID","raid":"N/A","raid_p":0,"raid_status":"","raid_cls":"","down":"N/A","up":"N/A"}'
+  :initial '{"ok":false,"title":"Connecting…","head":[],"sections":[]}'
   "python3 scripts/server.py")
 
 (deflisten weather
@@ -35,11 +35,11 @@
   "python3 scripts/weather.py")
 
 (deflisten cal
-  :initial '{"title":"","weeks":[]}'
+  :initial '{"title":"","heads":[],"weeks":[]}'
   "python3 scripts/calendar_grid.py")
 
 (deflisten pc
-  :initial '{"cpu_title":"CPU","cpu_use":"N/A","cpu_p":0,"cpu_temp":"N/A","uptime":"N/A","gpu_title":"GPU","gpu_use":"N/A","gpu_temp":"N/A","gpu_row3_name":"Clock:","gpu_row3":"N/A","ram":"N/A","ram_p":0,"disk":"N/A","disk_p":0,"has_battery":false,"battery":"","down":"N/A","up":"N/A"}'
+  :initial '{"cpu_title":"CPU","cpu_use":"N/A","cpu_p":0,"cpu_clock":"N/A","cpu_temp":"N/A","uptime":"N/A","gpu_title":"GPU","gpu_use":"N/A","gpu_temp":"N/A","gpu_clock":"N/A","has_vram":false,"gpu_vram":"","ram":"N/A","ram_p":0,"disk":"N/A","disk_p":0,"has_battery":false,"battery":"","down":"N/A","up":"N/A"}'
   "python3 scripts/pcstats.py")
 
 ;; true while the mouse is over the sunrise/sunset strip (reveals humidity / rain / wind)
@@ -74,6 +74,13 @@
     (row :name name :val val)
     (progress :class "bar ${pct >= 90 ? 'hot' : ''}" :value pct :orientation "h" :height {{y:5}})))
 
+;; one row of the Server column, built from a JSON row {n: name, v: value, p: bar % (-1 = no bar), c: colour class}
+(defwidget datarow [name val pct cls]
+  (box :class "${pct >= 0 ? 'barrow' : ''}" :orientation "v" :space-evenly false
+    (rowc :name name :val val :vclass cls)
+    (box :visible {pct >= 0}
+      (progress :class "bar ${pct >= 90 ? 'hot' : ''}" :value {pct >= 0 ? pct : 0} :orientation "h" :height {{y:5}}))))
+
 ;; big white title bar with black text; h = height in px
 (defwidget bigbar [text h]
   (box :class "bigbar" :height h
@@ -93,27 +100,17 @@
 
     (minibar :text {server.title})
     (box :class "rows" :orientation "v" :space-evenly false
-      (row :name "Uptime:"       :val {server.uptime})
-      (row :name "Load average:" :val {server.load}))
+      (for r in {server.head}
+        (datarow :name {r.n} :val {r.v} :pct {r.p} :cls {r.c})))
 
-    (minibar :text {server.cpu_name != "" ? server.cpu_name : "CPU & Memory"})
-    (box :class "rows" :orientation "v" :space-evenly false
-      (barrow :name "CPU:"  :val {server.cpu} :pct {server.cpu_p})
-      (row    :name "Temperature:" :val {server.temp})
-      (barrow :name "RAM:"  :val {server.ram} :pct {server.ram_p})
-      (row    :name "Swap:" :val {server.swap}))
-
-    (minibar :text "Storage")
-    (box :class "rows" :orientation "v" :space-evenly false
-      (barrow :name "System:" :val {server.ssd} :pct {server.ssd_p})
-      (box :orientation "v" :space-evenly false :visible {server.has_raid}
-        (barrow :name "${server.raid_name}:" :val {server.raid} :pct {server.raid_p})
-        (rowc   :name "Status:" :val {server.raid_status} :vclass {server.raid_cls})))
-
-    (minibar :text "Network")
-    (box :class "rows" :orientation "v" :space-evenly false
-      (row :name "Download:" :val {server.down})
-      (row :name "Upload:"   :val {server.up}))))
+    ;; the other sections (CPU & Memory, Storage, Network) come from scripts/server.py,
+    ;; so they follow the [server] settings in config.toml (which rows, which disks)
+    (for sec in {server.sections}
+      (box :orientation "v" :space-evenly false
+        (minibar :text {sec.t})
+        (box :class "rows" :orientation "v" :space-evenly false
+          (for r in {sec.rows}
+            (datarow :name {r.n} :val {r.v} :pct {r.p} :cls {r.c})))))))
 
 
 ;; ───────────────────────────── COLUMN 2 : CLOCK + WEATHER + CALENDAR ─────────────────────────────
@@ -188,18 +185,13 @@
     (box :class "month-bar" :height {{y:32}}
       (label :class "month-text" :hexpand true :text {cal.title}))
 
-    ;; weekday header (Fri + Sat are red = Bangladesh weekend)
+    ;; weekday header: names and red weekend days come from calendar_grid.py ([general] weekend / week_start)
     (box :class "weekday-bar" :orientation "h" :space-evenly false :height {{y:27}} :valign "start"
-      (label :class "wd" :width {{x:37}} :text "SUN")
-      (label :class "wd" :width {{x:37}} :text "MON")
-      (label :class "wd" :width {{x:37}} :text "TUE")
-      (label :class "wd" :width {{x:37}} :text "WED")
-      (label :class "wd" :width {{x:37}} :text "THU")
-      (label :class "wd wd-red" :width {{x:37}} :text "FRI")
-      (label :class "wd wd-red" :width {{x:37}} :text "SAT"))
+      (for h in {cal.heads}
+        (label :class "wd ${h.c}" :width {{x:37}} :text {h.t})))
 
     ;; 6 weeks x 7 days. The class string from calendar_grid.py is
-    ;;   "out" (other month, grey)  "wk" (Fri/Sat, red)  "today" (boxed)
+    ;;   "out" (other month, grey)  "wk" (weekend, red)  "today" (boxed)
     (box :class "cal-grid" :orientation "v" :space-evenly false
       (for week in {cal.weeks}
         (box :orientation "h" :space-evenly false
@@ -218,6 +210,7 @@
     (minibar :text {pc.cpu_title})
     (box :class "rows" :orientation "v" :space-evenly false
       (barrow :name "Utilization:" :val {pc.cpu_use} :pct {pc.cpu_p})
+      (row    :name "Clock:"       :val {pc.cpu_clock})
       (row    :name "Temperature:" :val {pc.cpu_temp})
       (row    :name "Uptime:"      :val {pc.uptime}))
 
@@ -225,7 +218,10 @@
     (box :class "rows" :orientation "v" :space-evenly false
       (row :name "Utilization:"       :val {pc.gpu_use})
       (row :name "Temperature:"       :val {pc.gpu_temp})
-      (row :name {pc.gpu_row3_name}   :val {pc.gpu_row3}))
+      (row :name "Clock:"             :val {pc.gpu_clock})
+      ;; only graphics cards with their own memory (NVIDIA, discrete AMD) - not Intel / APU graphics
+      (box :visible {pc.has_vram}
+        (row :name "VRAM:"            :val {pc.gpu_vram})))
 
     (minibar :text "Memory & Disk")
     (box :class "rows" :orientation "v" :space-evenly false
