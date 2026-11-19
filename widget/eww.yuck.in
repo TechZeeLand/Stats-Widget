@@ -27,7 +27,7 @@
   "python3 scripts/clock.py")
 
 (deflisten server
-  :initial '{"ok":false,"title":"Connecting…","head":[],"sections":[]}'
+  :initial '{"ok":false,"title":"Connecting…","uptime":"N/A","clock":"N/A","cpu":"N/A","cpu_p":0,"temp":"N/A","cpu_name":"","ram":"N/A","ram_p":0,"swap":"N/A","system_name":"System:","ssd":"N/A","ssd_p":0,"storage":[],"down":"N/A","up":"N/A","show_uptime":true,"show_cpu_clock":true,"show_cpu":true,"show_temp":true,"show_ram":true,"show_swap":true,"show_system":true,"show_storage":true,"show_network":true}'
   "python3 scripts/server.py")
 
 (deflisten weather
@@ -39,7 +39,7 @@
   "python3 scripts/calendar_grid.py")
 
 (deflisten pc
-  :initial '{"cpu_title":"CPU","cpu_use":"N/A","cpu_p":0,"cpu_clock":"N/A","cpu_temp":"N/A","uptime":"N/A","gpu_title":"GPU","gpu_use":"N/A","gpu_temp":"N/A","gpu_clock":"N/A","has_vram":false,"gpu_vram":"","ram":"N/A","ram_p":0,"disk":"N/A","disk_p":0,"has_battery":false,"battery":"","down":"N/A","up":"N/A"}'
+  :initial '{"cpu_title":"CPU","cpu_use":"N/A","cpu_p":0,"cpu_clock":"N/A","cpu_temp":"N/A","uptime":"N/A","gpu_title":"GPU","gpu_use":"N/A","gpu_temp":"N/A","has_vram":false,"vram":"N/A","ram":"N/A","ram_p":0,"disk":"N/A","disk_p":0,"has_battery":false,"battery":"","down":"N/A","up":"N/A","show_cpu":true,"show_cpu_clock":true,"show_cpu_temp":true,"show_uptime":true,"show_gpu_use":true,"show_gpu_temp":true,"show_vram":true,"show_ram":true,"show_disk":true,"show_battery":true,"show_network":true}'
   "python3 scripts/pcstats.py")
 
 ;; true while the mouse is over the sunrise/sunset strip (reveals humidity / rain / wind)
@@ -74,13 +74,6 @@
     (row :name name :val val)
     (progress :class "bar ${pct >= 90 ? 'hot' : ''}" :value pct :orientation "h" :height {{y:5}})))
 
-;; one row of the Server column, built from a JSON row {n: name, v: value, p: bar % (-1 = no bar), c: colour class}
-(defwidget datarow [name val pct cls]
-  (box :class "${pct >= 0 ? 'barrow' : ''}" :orientation "v" :space-evenly false
-    (rowc :name name :val val :vclass cls)
-    (box :visible {pct >= 0}
-      (progress :class "bar ${pct >= 90 ? 'hot' : ''}" :value {pct >= 0 ? pct : 0} :orientation "h" :height {{y:5}}))))
-
 ;; big white title bar with black text; h = height in px
 (defwidget bigbar [text h]
   (box :class "bigbar" :height h
@@ -100,17 +93,41 @@
 
     (minibar :text {server.title})
     (box :class "rows" :orientation "v" :space-evenly false
-      (for r in {server.head}
-        (datarow :name {r.n} :val {r.v} :pct {r.p} :cls {r.c})))
+      (box :orientation "v" :space-evenly false :visible {server.show_uptime}
+        (row :name "Uptime:"    :val {server.uptime}))
+      (box :orientation "v" :space-evenly false :visible {server.show_cpu_clock}
+        (row :name "CPU clock:" :val {server.clock})))
 
-    ;; the other sections (CPU & Memory, Storage, Network) come from scripts/server.py,
-    ;; so they follow the [server] settings in config.toml (which rows, which disks)
-    (for sec in {server.sections}
-      (box :orientation "v" :space-evenly false
-        (minibar :text {sec.t})
-        (box :class "rows" :orientation "v" :space-evenly false
-          (for r in {sec.rows}
-            (datarow :name {r.n} :val {r.v} :pct {r.p} :cls {r.c})))))))
+    (box :orientation "v" :space-evenly false :visible {server.show_cpu || server.show_temp || server.show_ram || server.show_swap}
+      (minibar :text {server.cpu_name != "" ? server.cpu_name : "CPU & Memory"})
+      (box :class "rows" :orientation "v" :space-evenly false
+        (box :orientation "v" :space-evenly false :visible {server.show_cpu}
+          (barrow :name "CPU:"  :val {server.cpu} :pct {server.cpu_p}))
+        (box :orientation "v" :space-evenly false :visible {server.show_temp}
+          (row :name "Temperature:" :val {server.temp}))
+        (box :orientation "v" :space-evenly false :visible {server.show_ram}
+          (barrow :name "RAM:"  :val {server.ram} :pct {server.ram_p}))
+        (box :orientation "v" :space-evenly false :visible {server.show_swap}
+          (row :name "Swap:" :val {server.swap}))))
+
+    ;; "Storage": the system disk, then one bar per storage pool (RAID, ZFS, a data disk ...).
+    ;; The pools and their names come from scripts/server.py; a pool with RAID health also gets a Status line.
+    (box :orientation "v" :space-evenly false :visible {server.show_system || server.show_storage}
+      (minibar :text "Storage")
+      (box :class "rows" :orientation "v" :space-evenly false
+        (box :orientation "v" :space-evenly false :visible {server.show_system}
+          (barrow :name {server.system_name} :val {server.ssd} :pct {server.ssd_p}))
+        (for p in {server.storage}
+          (box :orientation "v" :space-evenly false
+            (barrow :name {p.name} :val {p.val} :pct {p.pct})
+            (box :orientation "v" :space-evenly false :visible {p.status != ""}
+              (rowc :name "Status:" :val {p.status} :vclass {p.cls}))))))
+
+    (box :orientation "v" :space-evenly false :visible {server.show_network}
+      (minibar :text "Network")
+      (box :class "rows" :orientation "v" :space-evenly false
+        (row :name "Download:" :val {server.down})
+        (row :name "Upload:"   :val {server.up})))))
 
 
 ;; ───────────────────────────── COLUMN 2 : CLOCK + WEATHER + CALENDAR ─────────────────────────────
@@ -185,13 +202,13 @@
     (box :class "month-bar" :height {{y:32}}
       (label :class "month-text" :hexpand true :text {cal.title}))
 
-    ;; weekday header: names and red weekend days come from calendar_grid.py ([general] weekend / week_start)
+    ;; weekday header: the order of the days and which ones are red (weekend) come from config.toml
     (box :class "weekday-bar" :orientation "h" :space-evenly false :height {{y:27}} :valign "start"
       (for h in {cal.heads}
-        (label :class "wd ${h.c}" :width {{x:37}} :text {h.t})))
+        (label :class "wd ${h.c}" :width {{x:37}} :text {h.n})))
 
     ;; 6 weeks x 7 days. The class string from calendar_grid.py is
-    ;;   "out" (other month, grey)  "wk" (weekend, red)  "today" (boxed)
+    ;;   "out" (other month, grey)  "wk" (weekend day, red)  "today" (boxed)
     (box :class "cal-grid" :orientation "v" :space-evenly false
       (for week in {cal.weeks}
         (box :orientation "h" :space-evenly false
@@ -207,30 +224,43 @@
   (box :class "col col-pc" :orientation "v" :space-evenly false :width {{c3}}
     (bigbar :text "PC Stats" :h {{y:50}})
 
-    (minibar :text {pc.cpu_title})
-    (box :class "rows" :orientation "v" :space-evenly false
-      (barrow :name "Utilization:" :val {pc.cpu_use} :pct {pc.cpu_p})
-      (row    :name "Clock:"       :val {pc.cpu_clock})
-      (row    :name "Temperature:" :val {pc.cpu_temp})
-      (row    :name "Uptime:"      :val {pc.uptime}))
+    ;; every block and every row can be switched off in config.toml ([pc] show_*) / `stats-widget config` -> PC data;
+    ;; a block whose rows are all off disappears together with its heading
+    (box :orientation "v" :space-evenly false :visible {pc.show_cpu || pc.show_cpu_clock || pc.show_cpu_temp || pc.show_uptime}
+      (minibar :text {pc.cpu_title})
+      (box :class "rows" :orientation "v" :space-evenly false
+        (box :orientation "v" :space-evenly false :visible {pc.show_cpu}
+          (barrow :name "Utilization:" :val {pc.cpu_use} :pct {pc.cpu_p}))
+        (box :orientation "v" :space-evenly false :visible {pc.show_cpu_clock}
+          (row :name "Clock:"       :val {pc.cpu_clock}))
+        (box :orientation "v" :space-evenly false :visible {pc.show_cpu_temp}
+          (row :name "Temperature:" :val {pc.cpu_temp}))
+        (box :orientation "v" :space-evenly false :visible {pc.show_uptime}
+          (row :name "Uptime:"      :val {pc.uptime}))))
 
-    (minibar :text {pc.gpu_title})
-    (box :class "rows" :orientation "v" :space-evenly false
-      (row :name "Utilization:"       :val {pc.gpu_use})
-      (row :name "Temperature:"       :val {pc.gpu_temp})
-      (row :name "Clock:"             :val {pc.gpu_clock})
-      ;; only graphics cards with their own memory (NVIDIA, discrete AMD) - not Intel / APU graphics
-      (box :visible {pc.has_vram}
-        (row :name "VRAM:"            :val {pc.gpu_vram})))
+    (box :orientation "v" :space-evenly false :visible {pc.show_gpu_use || pc.show_gpu_temp || (pc.show_vram && pc.has_vram)}
+      (minibar :text {pc.gpu_title})
+      (box :class "rows" :orientation "v" :space-evenly false
+        (box :orientation "v" :space-evenly false :visible {pc.show_gpu_use}
+          (row :name "Utilization:" :val {pc.gpu_use}))
+        (box :orientation "v" :space-evenly false :visible {pc.show_gpu_temp}
+          (row :name "Temperature:" :val {pc.gpu_temp}))
+        ;; only graphics cards with their own memory have this row (integrated GPUs share the RAM)
+        (box :orientation "v" :space-evenly false :visible {pc.show_vram && pc.has_vram}
+          (row :name "VRAM:" :val {pc.vram}))))
 
-    (minibar :text "Memory & Disk")
-    (box :class "rows" :orientation "v" :space-evenly false
-      (barrow :name "RAM:"  :val {pc.ram}  :pct {pc.ram_p})
-      (barrow :name "Disk:" :val {pc.disk} :pct {pc.disk_p})
-      (box :visible {pc.has_battery}
-        (row :name "Battery:" :val {pc.battery})))
+    (box :orientation "v" :space-evenly false :visible {pc.show_ram || pc.show_disk || (pc.show_battery && pc.has_battery)}
+      (minibar :text "Memory & Disk")
+      (box :class "rows" :orientation "v" :space-evenly false
+        (box :orientation "v" :space-evenly false :visible {pc.show_ram}
+          (barrow :name "RAM:"  :val {pc.ram}  :pct {pc.ram_p}))
+        (box :orientation "v" :space-evenly false :visible {pc.show_disk}
+          (barrow :name "Disk:" :val {pc.disk} :pct {pc.disk_p}))
+        (box :orientation "v" :space-evenly false :visible {pc.show_battery && pc.has_battery}
+          (row :name "Battery:" :val {pc.battery}))))
 
-    (minibar :text "Network")
-    (box :class "rows" :orientation "v" :space-evenly false
-      (row :name "Download:" :val {pc.down})
-      (row :name "Upload:"   :val {pc.up}))))
+    (box :orientation "v" :space-evenly false :visible {pc.show_network}
+      (minibar :text "Network")
+      (box :class "rows" :orientation "v" :space-evenly false
+        (row :name "Download:" :val {pc.down})
+        (row :name "Upload:"   :val {pc.up})))))

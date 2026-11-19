@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import time
 
-from common import clock_text, duration, emit, fmt, size_pair
+from common import PC_SHOW_KEYS, clock_pair, duration, emit, fmt, load_config, size_pair
 
 NA = "N/A"
 GIB = 1024 ** 3
@@ -50,23 +50,28 @@ def cpu_title():
     return f"{model}, {khz / 1e6:.1f}GHz" if khz else model
 
 
-def cpu_clock_mhz(sys_root="/sys", proc_root="/proc"):
-    """Current CPU clock in MHz: the average over all cores (like HWiNFO's "average effective clock").
-    Uses cpufreq when the kernel offers it, otherwise the "cpu MHz" lines of /proc/cpuinfo."""
-    vals = []
-    for path in glob.glob(f"{sys_root}/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"):
-        khz = read_int(path)
+def cpu_clock(sys_root="/sys", proc_root="/proc"):
+    """Current CPU clock in MHz (average over all cores) and the hardware maximum -> (cur, max); 0 = unknown.
+    scaling_cur_freq is readable by everyone; /proc/cpuinfo is the fallback (VMs, kernels without cpufreq)."""
+    cur, top = [], []
+    for f in glob.glob(f"{sys_root}/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"):
+        khz = read_int(f)
         if khz and khz > 0:
-            vals.append(khz / 1000)
-    if not vals:
+            cur.append(khz / 1000)
+    for f in glob.glob(f"{sys_root}/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq"):
+        khz = read_int(f)
+        if khz and khz > 0:
+            top.append(khz / 1000)
+    if not cur:
         for line in (read(f"{proc_root}/cpuinfo", "") or "").splitlines():
             if line.startswith("cpu MHz"):
                 try:
-                    vals.append(float(line.split(":", 1)[1]))
+                    mhz = float(line.split(":", 1)[1])
                 except ValueError:
-                    pass
-    vals = [v for v in vals if v > 0]
-    return sum(vals) / len(vals) if vals else None
+                    continue
+                if mhz > 0:
+                    cur.append(mhz)
+    return (sum(cur) / len(cur) if cur else 0.0), (max(top) if top else 0.0)
 
 
 def cpu_times():
@@ -94,7 +99,7 @@ def find_cpu_temp_input():
 
 # ───────────────────────────── GPU ─────────────────────────────
 def pick_gpu():
-    """Prefer a discrete GPU (NVIDIA, then AMD) over an Intel iGPU."""
+    """Prefer a discrete GPU (NVIDIA, then AMD) over an Intel iGPU; between two AMD cards the one with more VRAM."""
     order = {"0x10de": 0, "0x1002": 1, "0x8086": 2}
     cards = []
     for card in sorted(glob.glob("/sys/class/drm/card*")):
@@ -102,9 +107,9 @@ def pick_gpu():
             continue
         vendor = read(card + "/device/vendor")
         if vendor:
-            cards.append((order.get(vendor, 3), card, vendor))
+            cards.append((order.get(vendor, 3), -(read_int(card + "/device/mem_info_vram_total") or 0), card, vendor))
     cards.sort()
-    return (cards[0][1], cards[0][2]) if cards else (None, None)
+    return (cards[0][2], cards[0][3]) if cards else (None, None)
 
 
 def gpu_title(card, vendor):
@@ -135,13 +140,17 @@ def gpu_title(card, vendor):
 
 
 class GPU:
+    """Reads one graphics card. stats() -> use / temp / clock, and vram = "used / total" ONLY for cards that
+    have memory of their own (NVIDIA, AMD). Integrated Intel graphics share the RAM, so vram stays None there
+    and the widget hides the VRAM row."""
+
     def __init__(self):
         self.card, self.vendor = pick_gpu()
         self.title = gpu_title(self.card, self.vendor) if self.card else "No GPU found"
         self.last_rc6 = None  # (timestamp, residency_ms) for Intel utilisation
+        self.nv_cache = (0.0, None)   # nvidia-smi is a whole process: ask it every 2 s at most
 
     def stats(self):
-        # "vram" stays None for GPUs that have no memory of their own (Intel iGPU, AMD APU): the widget then hides the row
         out = {"use": NA, "temp": NA, "vram": None, "clock": NA}
         if not self.card:
             return out
@@ -181,14 +190,17 @@ class GPU:
         if m:
             out["clock"] = f"{m.group(1)} MHz"
 
-    @staticmethod
-    def _nvidia(dev, out):
-        out["vram"] = NA                       # NVIDIA cards have their own memory
+    def _nvidia(self, dev, out):
+        out["vram"] = NA                       # NVIDIA cards have their own memory (row stays, N/A if unreadable)
         # Don't poke a sleeping laptop dGPU - it would wake it up and drain the battery.
         if read(dev + "/power/runtime_status") == "suspended":
             out.update(use="Asleep", temp="Asleep", vram="Asleep", clock="Asleep")
             return
         if not shutil.which("nvidia-smi"):
+            return
+        now = time.monotonic()
+        if now - self.nv_cache[0] < 2 and self.nv_cache[1]:
+            out.update(self.nv_cache[1])
             return
         try:
             line = subprocess.run(
@@ -203,16 +215,20 @@ class GPU:
                 return float(text)
             except ValueError:
                 return None
+        got = {}
         if number(use) is not None:
-            out["use"] = f"{number(use):.0f}%"
+            got["use"] = f"{number(use):.0f}%"
         if number(temp) is not None:
-            out["temp"] = f"{number(temp):.0f}°C"
+            got["temp"] = f"{number(temp):.0f}°C"
         if number(used) is not None and number(total):
-            out["vram"] = f"{number(used) / 1024:.2f} GB / {fmt(number(total) / 1024, 0)} GB"
+            got["vram"] = f"{number(used) / 1024:.2f} GB / {fmt(number(total) / 1024, 0)} GB"
         if number(clock) is not None:
-            out["clock"] = f"{number(clock):.0f} MHz"
+            got["clock"] = f"{number(clock):.0f} MHz"
+        self.nv_cache = (now, got)
+        out.update(got)
 
     def _intel(self, out):
+        # Integrated: no own memory -> vram stays None (row hidden).
         base = self.card
         for p in (base + "/gt_cur_freq_mhz", base + "/gt/gt0/rps_cur_freq_mhz",
                   base + "/device/tile0/gt0/freq0/cur_freq"):
@@ -232,6 +248,14 @@ class GPU:
                     out["use"] = f"~{max(0, min(100, round(100 * (1 - asleep))))}%"
                 self.last_rc6 = (now, rc6)
                 break
+
+
+def gpu_use_text(g):
+    """'37% · 1350 MHz' - utilisation and clock share one row; 'Asleep' stands alone."""
+    if g["use"] == "Asleep":
+        return "Asleep"
+    parts = [x for x in (g["use"], g["clock"]) if x != NA]
+    return " · ".join(parts) or NA
 
 
 # ─────────────────────────── RAM / network ───────────────────────────
@@ -275,7 +299,15 @@ def net_totals():
     return rx, tx
 
 
+def pc_flags(pcfg):
+    """{'show_cpu': True, ...} for every switch in [pc]."""
+    return {f"show_{k}": bool(pcfg.get(f"show_{k}", True)) for k in PC_SHOW_KEYS}
+
+
 def main():
+    flags = pc_flags(load_config().get("pc", {}))
+    # A hidden GPU block is not even read: no nvidia-smi calls, no waking of a sleeping laptop GPU.
+    need_gpu = flags["show_gpu_use"] or flags["show_gpu_temp"] or flags["show_vram"]
     cpu_name, gpu = cpu_title(), GPU()
     temp_path = find_cpu_temp_input()
     prev_cpu, prev_net, prev_t = cpu_times(), net_totals(), time.monotonic()
@@ -295,26 +327,27 @@ def main():
         up = max(0, tx - prev_net[1]) / 1048576 / dt
         prev_net, prev_t = (rx, tx), started
 
-        g = gpu.stats()
+        g = gpu.stats() if need_gpu else {"use": NA, "temp": NA, "vram": None, "clock": NA}
         ram, ram_p = ram_info()
         disk, disk_p = disk_info("/")
         bat, _ = battery()
+        mhz, mhz_max = cpu_clock()
         uptime = duration(float((read("/proc/uptime", "0") or "0").split()[0]))
         emit({
             "cpu_title": cpu_name,
             "cpu_use": f"{usage:.0f}%", "cpu_p": round(usage),
-            "cpu_clock": clock_text(cpu_clock_mhz()),
+            "cpu_clock": clock_pair(mhz, mhz_max),
             "cpu_temp": f"{temp_raw / 1000:.0f}°C" if temp_raw is not None else NA,
             "uptime": uptime,
             "gpu_title": gpu.title,
-            "gpu_use": g["use"], "gpu_temp": g["temp"],
-            "gpu_clock": g["clock"],
-            "has_vram": g["vram"] is not None, "gpu_vram": g["vram"] or "",
+            "gpu_use": gpu_use_text(g), "gpu_temp": g["temp"],
+            "has_vram": g["vram"] is not None, "vram": g["vram"] or NA,
             "ram": ram, "ram_p": round(ram_p),
             "disk": disk, "disk_p": round(disk_p),
             "has_battery": bool(bat), "battery": bat,
             "down": f"{down:.2f} MB/s",
             "up": f"{up:.2f} MB/s",
+            **flags,
         })
         time.sleep(max(0.2, 1 - (time.monotonic() - started)))
 

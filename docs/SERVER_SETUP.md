@@ -1,7 +1,7 @@
 # Server setup (`stats.php`)
 
 The server column reads a small JSON document from **`stats.php`**. It only needs PHP (7.4+) on a Linux machine.
-It reports CPU, temperature, RAM, swap, load, uptime, the system disk, **RAID/storage pools with health**, and network counters.
+It reports CPU (usage, clock, temperature), RAM, swap, load, uptime, the system disk, **RAID/storage pools with health**, and network counters.
 
 ## 1. Quick start (nginx or Apache, no Docker)
 ```bash
@@ -29,6 +29,12 @@ Copy `stats.config.example.php` to `stats.config.php` next to `stats.php` (Docke
 ];
 ```
 
+### Let the widget choose (default)
+You normally do **not** need `raid_paths` any more: in `stats-widget config` → *Server data* you list the storage folders, the system disk and the
+network cards, and the widget sends them to `stats.php` (`?paths[]=/raids&paths[]=/mnt/media&system=/&nic[]=enp3s0`). Paths are validated
+(absolute, no `..`, at most 6) and the answer only contains disk sizes. Folders must still be **visible to PHP** (in Docker: mounted into the container).
+Prefer the server to decide everything? Set `'allow_client_config' => false` (Docker: `STATS_ALLOW_CLIENT_CONFIG=0`); use a `token` if the endpoint is reachable by people you do not trust.
+
 ## 3. RAID shows "Not reachable" / N/A? Run the debug page
 ```
 http://192.168.0.123/stats.php?debug=1
@@ -43,8 +49,6 @@ The usual causes:
 | `open_basedir` blocks the path | add the path to `open_basedir` in your PHP pool config, or clear it |
 | systemd hardening (`ProtectSystem=strict`, `PrivateTmp`, `ProtectHome`) in the php-fpm unit | `systemctl edit php8.x-fpm` and allow `ReadOnlyPaths=/raids`, or relax the options |
 | The RAID is mounted somewhere else | set `raid_paths` (or leave it: with `auto_detect` mdadm / ZFS / btrfs / mergerfs mounts are found automatically) |
-
-**Which disks the widget shows is chosen in the widget** (`stats-widget config` → *Server rows*), not here: `stats.php` reports every disk it can see and the widget picks. `raid_paths` only matters for very old widgets.
 
 **No RAID?** If the folder you point at is on the same disk as the system (for example a plain `/raids` directory), `stats.php` detects that and the widget simply hides the RAID row - nothing to configure.
 
@@ -121,13 +125,14 @@ and consider the `token` option. If it must be reachable remotely, serve it only
 
 ## 6. The JSON
 ```jsonc
-{ "version":2, "host":"rayaz", "uptime":1234567, "load":[0.42,0.37,0.31], "cores":12, "cpu_mhz":2893,
-  "cpu":18.4, "temp":47.5,
+{ "version":3, "host":"rayaz", "uptime":1234567, "load":[0.42,0.37,0.31], "cores":12,
+  "cpu":18.4, "cpu_mhz":2840, "cpu_mhz_max":4600, "temp":47.5,
   "ram_u":9.6, "ram_t":31.2, "ram_p":30.8, "swap_u":0.1, "swap_t":4, "swap_p":2.5,
   "ssd_u":212.4, "ssd_t":465.8, "ssd_p":45.6,
   "raid_u":6840.2, "raid_t":10900.0, "raid_p":62.8,
+  "storage":[{"path":"/raids","kind":"raid","ok":true,"used":6840.2,"total":10900.0,"percent":62.8,"md":{"name":"md0","level":"raid5","devices":4,"working":4,"health":"ok"}}],
   "raid":{"path":"/raids","ok":true,"error":null,"arrays":[{"name":"md0","level":"raid5","devices":4,"working":4,"health":"ok"}]},
   "disks":[{"mount":"/","fs":"ext4","used":212.4,"total":465.8,"percent":45.6,"array":false}],
-  "net_rx":5000000000, "net_tx":2000000000, "net_iface":"enp3s0" }
+  "net_rx":5000000000, "net_tx":2000000000, "net_iface":"enp3s0", "net_t":1795032359.962, "client_config":true }
 ```
 All sizes are GB. The keys of the original version (`cpu temp ram_* ssd_* raid_* net_*`) are unchanged, so older widgets keep working.

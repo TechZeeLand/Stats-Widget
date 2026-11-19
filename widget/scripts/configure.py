@@ -16,11 +16,18 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
 from apply_config import apply  # noqa: E402
-from common import (ANCHORS, DAY_CODES, DEFAULT_H, DEFAULT_W, LAYERS, MAX_SCALE, MIN_SCALE, config_path,  # noqa: E402
-                    load_config, reload_widget, rnd, save_config, week_start, weekend_days, widget_size)
-from server import fetch, request_params  # noqa: E402
+from common import (ANCHORS, DEFAULT_H, DEFAULT_W, LAYERS, MAX_SCALE, MAX_STORAGE, MIN_SCALE, PC_SHOW_KEYS,  # noqa: E402
+                    SHOW_KEYS, WEEKDAYS, clean_list, config_path, load_config, reload_widget, rnd, save_config,
+                    storage_pairs, week_start, weekend_days, widget_size)
+from server import fetch, server_params  # noqa: E402
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+SHOW_LABELS = {"uptime": "Uptime", "cpu_clock": "CPU clock", "cpu": "CPU usage", "temp": "Temperature",
+               "ram": "RAM", "swap": "Swap", "system": "System disk", "storage": "Storage pools",
+               "network": "Network speed"}
+PC_SHOW_LABELS = {"cpu": "CPU usage", "cpu_clock": "CPU clock", "cpu_temp": "CPU temperature", "uptime": "Uptime",
+                  "gpu_use": "GPU usage & clock", "gpu_temp": "GPU temperature", "vram": "VRAM (own-memory cards)",
+                  "ram": "RAM", "disk": "Disk", "battery": "Battery (laptops)", "network": "Network speed"}
 
 HERE = Path(__file__).resolve().parent
 
@@ -66,7 +73,7 @@ def page(rows):
 class Settings(Gtk.Window):
     def __init__(self):
         super().__init__(title="Stats Widget – Settings")
-        self.set_default_size(680, 580)
+        self.set_default_size(660, 620)
         self.set_border_width(0)
         self.cfg = load_config()
         c = self.cfg
@@ -75,9 +82,9 @@ class Settings(Gtk.Window):
         nb = Gtk.Notebook()
         box.pack_start(nb, True, True, 0)
         nb.append_page(scrolled(self.server_page(c)), Gtk.Label(label="Server"))
-        nb.append_page(scrolled(self.server_show_page(c)), Gtk.Label(label="Server rows"))
+        nb.append_page(scrolled(self.server_data_page(c)), Gtk.Label(label="Server data"))
+        nb.append_page(scrolled(self.pc_data_page(c)), Gtk.Label(label="PC data"))
         nb.append_page(scrolled(self.weather_page(c)), Gtk.Label(label="Weather"))
-        nb.append_page(scrolled(self.calendar_page(c)), Gtk.Label(label="Calendar"))
         nb.append_page(scrolled(self.look_page(c)), Gtk.Label(label="Look & Size"))
         nb.append_page(scrolled(self.position_page(c)), Gtk.Label(label="Position"))
 
@@ -143,103 +150,6 @@ class Settings(Gtk.Window):
         ]), False, False, 0)
         return outer
 
-    # ───────────── Server rows (what the Server column shows) ─────────────
-    def server_show_page(self, c):
-        s = c["server"]
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=18)
-        outer.pack_start(Gtk.Label(xalign=0, wrap=True, label=(
-            "Choose what the Server column shows. This is decided here in the widget - nothing needs to be "
-            "changed on the server. Disks, RAID arrays and pools are listed by the server; pick the ones you want.")),
-            False, False, 0)
-
-        def switch(key):
-            return Gtk.Switch(active=bool(s.get(key, True)), halign=Gtk.Align.START)
-        self.show = {k: switch(k) for k in ("show_uptime", "show_cpu", "show_clock", "show_temperature",
-                                            "show_ram", "show_swap", "show_network", "show_system_disk")}
-        self.srv_name = Gtk.Entry(text=s.get("name", ""), placeholder_text="(the server's own hostname)")
-        self.sys_label = Gtk.Entry(text=s.get("system_label", "System"))
-        self.sys_path = Gtk.Entry(text=s.get("system_path", ""), placeholder_text="(server default)")
-        self.nics = Gtk.Entry(text=", ".join(s.get("net_interfaces", [])), placeholder_text="(all physical network cards)")
-        self.max_rows = spin(int(s.get("max_storage_rows", 3)), 0, 8)
-        self.raid_label = Gtk.Entry(text=s.get("raid_label", "RAID"))
-        outer.pack_start(page([
-            ("Server name", self.srv_name, "Shown in the first title bar instead of the hostname."),
-            ("Uptime", self.show["show_uptime"], None),
-            ("CPU usage", self.show["show_cpu"], None),
-            ("CPU clock speed", self.show["show_clock"], "Current speed, averaged over all cores."),
-            ("Temperature", self.show["show_temperature"], None),
-            ("RAM", self.show["show_ram"], None),
-            ("Swap", self.show["show_swap"], None),
-            ("Network speed", self.show["show_network"], None),
-            ("Network cards", self.nics, "Comma separated, e.g. enp3s0, enp4s0. Empty = all physical cards."),
-        ]), False, False, 0)
-
-        outer.pack_start(Gtk.Label(xalign=0, use_markup=True, label="<b>Storage</b>"), False, False, 0)
-        outer.pack_start(page([
-            ("System disk", self.show["show_system_disk"], None),
-            ("System disk name", self.sys_label, None),
-            ("System disk path", self.sys_path, "A mount point on the server, e.g. /. Empty = the server's default."),
-        ]), False, False, 0)
-        outer.pack_start(Gtk.Label(xalign=0, wrap=True, label=(
-            "Extra storage rows. Leave the list EMPTY for automatic: every separate disk, RAID array or pool "
-            "the server reports is shown (nothing if it only has its system disk). Or add the mount points "
-            "you want, exactly as the SERVER sees them (inside Docker: the path inside the container).")),
-            False, False, 0)
-        self.disk_store = Gtk.ListStore(str, str)           # name, mount point
-        labels = list(s.get("storage_labels", [])) + [""] * len(s.get("storage_paths", []))
-        for i, path in enumerate(s.get("storage_paths", [])):
-            self.disk_store.append([labels[i], path])
-        self.disk_tree = Gtk.TreeView(model=self.disk_store)
-        for idx, title, expand in ((0, "Name", False), (1, "Mount point on the server", True)):
-            r = Gtk.CellRendererText(editable=True)
-            r.connect("edited", self.on_disk_edited, idx)
-            col = Gtk.TreeViewColumn(title, r, text=idx)
-            col.set_expand(expand)
-            col.set_resizable(True)
-            self.disk_tree.append_column(col)
-        sc = Gtk.ScrolledWindow(min_content_height=90)
-        sc.add(self.disk_tree)
-        sc.set_shadow_type(Gtk.ShadowType.IN)
-        outer.pack_start(sc, True, True, 0)
-        btns = Gtk.Box(spacing=6)
-        for text, cb in (("Add", self.on_disk_add), ("Remove", self.on_disk_remove)):
-            b = Gtk.Button(label=text)
-            b.connect("clicked", cb)
-            btns.pack_start(b, False, False, 0)
-        outer.pack_start(btns, False, False, 0)
-        outer.pack_start(page([
-            ("Automatic mode: at most", self.max_rows, "Extra disks shown when the list above is empty. Each one needs about 25-50 px of height."),
-            ("Automatic mode: RAID name", self.raid_label, "Name of RAID / ZFS / btrfs / mergerfs rows, e.g. “RAID:”."),
-        ]), False, False, 0)
-        return outer
-
-    def on_disk_edited(self, _r, path, text, idx):
-        self.disk_store[path][idx] = text.strip()
-
-    def on_disk_add(self, _b):
-        it = self.disk_store.append(["", "/"])
-        self.disk_tree.set_cursor(self.disk_store.get_path(it), self.disk_tree.get_column(1), True)
-
-    def on_disk_remove(self, _b):
-        model, it = self.disk_tree.get_selection().get_selected()
-        if it:
-            model.remove(it)
-
-    # ───────────── Calendar ─────────────
-    def calendar_page(self, c):
-        weekend, first = weekend_days(c), week_start(c)
-        self.weekend_checks = []
-        box = Gtk.Box(spacing=10)
-        for i, name in enumerate(DAY_NAMES):
-            chk = Gtk.CheckButton(label=name[:3], active=i in weekend)
-            self.weekend_checks.append(chk)
-            box.pack_start(chk, False, False, 0)
-        self.week_first = combo(DAY_NAMES, DAY_NAMES[first])
-        return page([
-            ("Weekend days", box, "Drawn in red in the calendar. Not every country has the same weekend."),
-            ("Week starts on", self.week_first, "The first column of the calendar."),
-        ])
-
     def on_cell_edited(self, _r, path, text, idx):
         self.store[path][idx] = text.strip()
 
@@ -263,20 +173,181 @@ class Settings(Gtk.Window):
 
     def on_test(self, _b):
         token, timeout = self.token.get_text(), float(self.timeout.get_value())
-        params = request_params({"system_path": self.sys_path.get_text(), "net_interfaces": self.nics.get_text().split(",")})
         for row in self.store:
             row[2] = "…"
+        params = server_params(self.collect_server_data())
         for i, row in enumerate(self.store):
             threading.Thread(target=self._test_one, args=(i, row[1], token, timeout, params), daemon=True).start()
 
     def _test_one(self, i, url, token, timeout, params):
         try:
             d = fetch(url, token, timeout, params)
-            disks = d.get("disks") if isinstance(d, dict) else None
-            msg = f"✓ {d.get('host', 'ok')}" + (f" · {len(disks)} disk(s)" if isinstance(disks, list) else " · old stats.php")
+            d = d if isinstance(d, dict) else {}
+            msg = f"✓ {d.get('host', 'ok')}"
+            pools = d.get("storage") if isinstance(d.get("storage"), list) else None
+            if params and d.get("client_config") is not True:
+                msg += "  (server ignores the Server data settings)"
+            elif pools is not None:
+                missing = [p for p in pools if isinstance(p, dict) and not p.get("ok")]
+                msg += f"  ({len(pools) - len(missing)} storage found" + (f", {len(missing)} missing)" if missing else ")")
+            elif d.get("raid", {}).get("present", True) is not False and not d.get("raid", {}).get("ok", True):
+                msg += "  (RAID: not found)"
         except Exception as exc:
             msg = "✗ " + str(getattr(exc, "reason", exc))[:40]
         GLib.idle_add(lambda: self.store[i].__setitem__(2, msg) if i < len(self.store) else None)
+
+    # ───────────── Server data ─────────────
+    def server_data_page(self, c):
+        s = c["server"]
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=18)
+        intro = Gtk.Label(xalign=0, wrap=True, label=(
+            "What the Server column shows. The paths below are sent to stats.php with every request, so you do not "
+            "have to edit anything on the server (unless its admin switched allow_client_config off). "
+            "Leave a list empty to use whatever the server itself is set up for."))
+        outer.pack_start(intro, False, False, 0)
+
+        head = Gtk.Label(xalign=0, wrap=True, use_markup=True, label=(
+            f"<b>Storage pools</b> - RAID arrays, ZFS pools, data disks … (up to {MAX_STORAGE}). "
+            "Each row is a folder on the server (where the pool is mounted). Leave the list empty to let the server "
+            "decide / detect. More than one row makes the widget shrink a little so everything still fits."))
+        outer.pack_start(head, False, False, 0)
+        self.sstore = Gtk.ListStore(str, str)           # name ("" = automatic), path on the server
+        for label, path in storage_pairs(c):
+            self.sstore.append([label, path])
+        self.stree = Gtk.TreeView(model=self.sstore)
+        for idx, title, expand in ((0, "Name (optional)", False), (1, "Path on the server", True)):
+            r = Gtk.CellRendererText(editable=True)
+            r.connect("edited", lambda _r, path, text, i=idx: self.sstore[path].__setitem__(i, text.strip()))
+            col = Gtk.TreeViewColumn(title, r, text=idx)
+            col.set_expand(expand)
+            col.set_resizable(True)
+            self.stree.append_column(col)
+        sc = Gtk.ScrolledWindow(min_content_height=90)
+        sc.add(self.stree)
+        sc.set_shadow_type(Gtk.ShadowType.IN)
+        outer.pack_start(sc, True, True, 0)
+        btns = Gtk.Box(spacing=6)
+        for text, cb in (("Add", self.on_s_add), ("Remove", self.on_s_remove), ("Move up", lambda *_: self.on_s_move(-1)),
+                         ("Move down", lambda *_: self.on_s_move(1)), ("Find on server…", self.on_find)):
+            b = Gtk.Button(label=text)
+            b.connect("clicked", cb)
+            btns.pack_start(b, False, False, 0)
+        outer.pack_start(btns, False, False, 0)
+
+        self.show_switches = {}
+        outer.pack_start(Gtk.Label(xalign=0, use_markup=True, label="<b>Rows to show</b>"), False, False, 0)
+        grid = Gtk.Grid(column_spacing=22, row_spacing=6, margin_start=6)
+        for n, key in enumerate(SHOW_KEYS):
+            box = Gtk.CheckButton(label=SHOW_LABELS[key], active=bool(s.get(f"show_{key}", True)))
+            self.show_switches[key] = box
+            grid.attach(box, n % 3, n // 3, 1, 1)
+        outer.pack_start(grid, False, False, 0)
+
+        self.srv_name = Gtk.Entry(text=str(s.get("name", "")), placeholder_text="the server's own hostname")
+        self.sys_label = Gtk.Entry(text=s["system_label"])
+        self.sys_path = Gtk.Entry(text=s["system_path"], placeholder_text="server default (normally /)")
+        self.nics = Gtk.Entry(text=", ".join(clean_list(s["net_interfaces"])), placeholder_text="all physical network cards")
+        outer.pack_start(page([
+            ("Server name", self.srv_name, "Shown in the first title bar instead of the hostname."),
+            ("System disk name", self.sys_label, "Shown as e.g. “System:”."),
+            ("System disk path", self.sys_path, "Folder on the server whose disk is shown as the system disk."),
+            ("Network cards", self.nics, "Comma separated, e.g. enp3s0, enp4s0. Speeds are summed."),
+        ]), False, False, 0)
+
+        return outer
+
+    def on_s_add(self, _b):
+        if len(self.sstore) >= MAX_STORAGE:
+            self.status.set_text(f"At most {MAX_STORAGE} storage rows.")
+            return
+        it = self.sstore.append(["", "/"])
+        self.stree.set_cursor(self.sstore.get_path(it), self.stree.get_column(1), True)
+
+    def on_s_remove(self, _b):
+        model, it = self.stree.get_selection().get_selected()
+        if it:
+            model.remove(it)
+
+    def on_s_move(self, d):
+        model, it = self.stree.get_selection().get_selected()
+        if not it:
+            return
+        i = model.get_path(it)[0]
+        j = i + d
+        if 0 <= j < len(model):
+            model.swap(it, model.get_iter(j))
+
+    def collect_server_data(self):
+        """The current (unsaved) Server data settings, as a [server] dict - used by Test and Find."""
+        pairs = [(r[0].strip(), r[1].strip()) for r in self.sstore if r[1].strip()][:MAX_STORAGE]
+        return {"storage_paths": [p for _l, p in pairs], "storage_labels": [l for l, _p in pairs],
+                "system_path": self.sys_path.get_text().strip(),
+                "net_interfaces": [n for n in clean_list(self.nics.get_text()) if n]}
+
+    def on_find(self, _b):
+        urls = [r[1] for r in self.store if r[1].strip()]
+        token, timeout = self.token.get_text(), float(self.timeout.get_value())
+        self.status.set_text("Asking the server which disks it can see…")
+
+        def work():
+            for url in urls:
+                try:
+                    data = fetch(url, token, timeout)          # no parameters: show what the server sees by itself
+                    GLib.idle_add(self.show_disks, data.get("disks") if isinstance(data, dict) else None)
+                    return
+                except Exception:
+                    continue
+            GLib.idle_add(self.status.set_text, "No server address answered.")
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_disks(self, disks):
+        found = [d for d in (disks or []) if isinstance(d, dict) and not d.get("system") and d.get("mount")]
+        if not found:
+            self.status.set_text("The server reports no disk besides the system disk "
+                                 "(with Docker: mount the pool into the container first).")
+            return
+        self.status.set_text(f"Config file: {config_path()}")
+        dlg = Gtk.Dialog(title="Disks found on the server", transient_for=self, modal=True)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Add selected", Gtk.ResponseType.OK)
+        dlg.set_default_size(480, 320)
+        have = {r[1] for r in self.sstore}
+        store = Gtk.ListStore(bool, str, str)
+        for d in found:
+            kind = "RAID / pool" if d.get("array") else d.get("fs", "")
+            size = f"{d.get('used', 0):.0f} / {d.get('total', 0):.0f} GB"
+            store.append([False, d["mount"], f"{kind}  ·  {size}"])
+        tree = Gtk.TreeView(model=store)
+        toggle = Gtk.CellRendererToggle()
+        toggle.connect("toggled", lambda _r, path: store.__setitem__(path, [not store[path][0], store[path][1], store[path][2]]))
+        tree.append_column(Gtk.TreeViewColumn("Show", toggle, active=0))
+        tree.append_column(Gtk.TreeViewColumn("Mount point", Gtk.CellRendererText(), text=1))
+        tree.append_column(Gtk.TreeViewColumn("Type · size", Gtk.CellRendererText(), text=2))
+        dlg.get_content_area().pack_start(scrolled(tree), True, True, 6)
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            for ticked, mount, _info in store:
+                if ticked and mount not in have and len(self.sstore) < MAX_STORAGE:
+                    self.sstore.append(["", mount])
+        dlg.destroy()
+
+    # ───────────── PC data ─────────────
+    def pc_data_page(self, c):
+        pc = c.get("pc", {})
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=18)
+        outer.pack_start(Gtk.Label(xalign=0, wrap=True, label=(
+            "Choose which rows the PC Stats column shows. A block whose rows are all switched off disappears "
+            "together with its heading. A hidden GPU block is not read at all (no nvidia-smi calls, a sleeping "
+            "laptop GPU is left alone). Rows that do not exist on this machine (VRAM, battery) stay hidden anyway.")),
+            False, False, 0)
+        self.pc_switches = {}
+        grid = Gtk.Grid(column_spacing=22, row_spacing=6, margin_start=6)
+        for n, key in enumerate(PC_SHOW_KEYS):
+            box = Gtk.CheckButton(label=PC_SHOW_LABELS[key], active=bool(pc.get(f"show_{key}", True)))
+            self.pc_switches[key] = box
+            grid.attach(box, n % 2, n // 2, 1, 1)
+        outer.pack_start(grid, False, False, 0)
+        return outer
 
     # ───────────── Weather ─────────────
     def weather_page(self, c):
@@ -358,8 +429,15 @@ class Settings(Gtk.Window):
         self.height.connect("value-changed", lambda *_: self.on_dim("h"))
         reset = Gtk.Button(label=f"Reset to default ({DEFAULT_W} × {DEFAULT_H})", halign=Gtk.Align.START)
         reset.connect("clicked", self.on_size_reset)
+        self.week_start = combo(DAY_NAMES, DAY_NAMES[week_start(c)])
+        self.weekend = [Gtk.CheckButton(label=n[:3], active=i in weekend_days(c)) for i, n in enumerate(DAY_NAMES)]
+        weekend_row = Gtk.Box(spacing=10)
+        for b in self.weekend:
+            weekend_row.pack_start(b, False, False, 0)
         return page([
             ("24-hour clock", self.h24, "Off: 3:07    On: 15:07"),
+            ("Calendar starts on", self.week_start, "The first column of the month calendar."),
+            ("Weekend days", weekend_row, "Drawn in red. Countries differ: tick your own weekend (none is fine too)."),
             ("Background opacity (%)", self.opacity, "100 = solid black, lower = see-through."),
             ("Size (%)", self.scale, f"100 % = {DEFAULT_W} × {DEFAULT_H} px. Everything inside grows or shrinks with it."),
             ("Width (px)", self.width, None),
@@ -443,20 +521,21 @@ class Settings(Gtk.Window):
             urls=[r[1] for r in self.store if r[1].strip()],
             labels=[r[0] for r in self.store if r[1].strip()],
             token=self.token.get_text(), interval=self.interval.get_value(), timeout=self.timeout.get_value(),
-            retry_primary=int(self.retry.get_value()), raid_label=self.raid_label.get_text() or "RAID",
-            name=self.srv_name.get_text().strip(), system_label=self.sys_label.get_text().strip() or "System",
-            system_path=self.sys_path.get_text().strip(),
-            storage_paths=[r[1] for r in self.disk_store if r[1].strip()],
-            storage_labels=[r[0] for r in self.disk_store if r[1].strip()],
-            max_storage_rows=int(self.max_rows.get_value()),
-            net_interfaces=[n.strip() for n in self.nics.get_text().split(",") if n.strip()],
-            **{k: sw.get_active() for k, sw in self.show.items()})
+            retry_primary=int(self.retry.get_value()))
+        pairs = [(r[0].strip(), r[1].strip()) for r in self.sstore if r[1].strip()][:MAX_STORAGE]
+        c["server"].update(
+            name=self.srv_name.get_text().strip(),
+            system_label=self.sys_label.get_text().strip() or "System", system_path=self.sys_path.get_text().strip(),
+            storage_paths=[p for _l, p in pairs], storage_labels=[l for l, _p in pairs],
+            net_interfaces=[n for n in clean_list(self.nics.get_text()) if n],
+            **{f"show_{k}": sw.get_active() for k, sw in self.show_switches.items()})
+        c["general"].update(week_start=WEEKDAYS[max(0, self.week_start.get_active())],
+                            weekend=[WEEKDAYS[i] for i, b in enumerate(self.weekend) if b.get_active()])
+        c.setdefault("pc", {}).update({f"show_{k}": sw.get_active() for k, sw in self.pc_switches.items()})
         c["weather"].update(
             display_name=self.w_name.get_text(), latitude=self.w_lat.get_value(), longitude=self.w_lon.get_value(),
             units=self.w_units.get_active_text(), refresh_minutes=int(self.w_refresh.get_value()))
         c["general"]["use_24h"] = self.h24.get_active()
-        c["general"]["weekend"] = [DAY_CODES[i] for i, chk in enumerate(self.weekend_checks) if chk.get_active()]
-        c["general"]["week_start"] = DAY_NAMES[self.week_first.get_active()].lower()
         c["appearance"]["background_opacity"] = int(self.opacity.get_value())
         c["appearance"].update(width=int(self.width.get_value()), height=int(self.height.get_value()))
         c["position"].update(

@@ -42,4 +42,32 @@ check(is_system_disk('/pool', '/', $mounts) === false, 'a /dev/md mount is never
 check(is_system_disk('/tmp', '/tmp', $mounts) === true, 'same path = same disk');
 $sys = [['dev' => '/dev/nvme0n1p2', 'mount' => '/', 'fs' => 'ext4'], ['dev' => '/dev/nvme0n1p2', 'mount' => '/raids', 'fs' => 'ext4']];
 check(is_system_disk('/raids', '/', $sys) === true, 'bind mount of the same source device is the system disk');
+
+// settings sent by the widget
+check(safe_path('/raids/') === '/raids' && safe_path('/') === '/', 'safe_path: normal paths');
+check(safe_path('raids') === null && safe_path('/a/../etc') === null && safe_path("/a\0b") === null && safe_path('') === null, 'safe_path: relative / traversal / NUL / empty rejected');
+check(safe_path('/' . str_repeat('a', 300)) === null, 'safe_path: too long');
+check(safe_nic('enp3s0') === 'enp3s0' && safe_nic('br0.10') === 'br0.10' && safe_nic('a b') === null && safe_nic('x;rm') === null, 'safe_nic');
+$on = ['allow_client_config' => true];
+$o = client_overrides($on, ['paths' => ['/raids', '/raids/', '../x', '/mnt/m'], 'system' => '/', 'nic' => 'eth0,eth1']);
+check($o['paths'] === ['/raids', '/mnt/m'] && $o['system'] === '/' && $o['nic'] === ['eth0', 'eth1'], 'overrides: arrays and comma strings, duplicates and bad values dropped');
+check(client_overrides($on, ['paths' => ['relative']])['paths'] === null, 'overrides: nothing valid -> server default');
+check(client_overrides(['allow_client_config' => false], ['paths' => ['/raids']]) === ['paths' => null, 'system' => null, 'nic' => null], 'overrides: switched off');
+check(count(request_list(array_map(fn($i) => "/p$i", range(1, 20)), 'safe_path', 6)) === 6, 'overrides: at most 6 paths');
+
+// pools
+check(pool_kind(['dev' => '/dev/md0', 'mount' => '/r', 'fs' => 'ext4']) === 'raid', 'kind: md');
+check(pool_kind(['dev' => 'tank', 'mount' => '/tank', 'fs' => 'zfs']) === 'zfs' && pool_kind(null) === 'disk', 'kind: zfs / plain');
+$arrs = parse_mdstat($healthy . "\nmd1 : active raid1 sdb1[1] sda1[0]\n      10 blocks [2/1] [_U]\n\n");
+check(md_for_entry(['dev' => '/dev/md1', 'mount' => '/x', 'fs' => 'ext4'], $arrs)['health'] === 'degraded', 'md_for_entry: right array');
+check(md_for_entry(['dev' => '/dev/sda1', 'mount' => '/x', 'fs' => 'ext4'], $arrs) === null, 'md_for_entry: not an array');
+if (is_dir('/dev/shm') && @disk_total_space('/dev/shm') > 0) {
+    $c = ['system_path' => '/', 'raid_paths' => ['/nope'], 'auto_detect' => false];
+    $notes = [];
+    $p = storage_pools($c, [], [], ['/dev/shm', '/definitely/missing'], $notes);
+    check(count($p) === 2 && $p[0]['ok'] === true && $p[1]['ok'] === false, 'explicit paths: a real one and a missing one (shown as an error row)');
+    $p = storage_pools($c, [], [], null, $notes);
+    check($p === [], 'server default path missing and no RAID known: no row');
+}
+check(is_array(cpu_clock('/proc', '/sys')) && count(cpu_clock('/proc', '/sys')) === 2, 'cpu_clock returns [current, max]');
 echo "all PHP tests passed\n";

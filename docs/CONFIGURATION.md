@@ -6,8 +6,8 @@ Easiest: **`stats-widget config`** (settings window). Everything below is what i
 ```toml
 [general]
 use_24h = false
-weekend = ["fri", "sat"]
-week_start = "sunday"
+week_start = "sun"            # mon tue wed thu fri sat sun
+weekend    = ["fri", "sat"]   # drawn red; any days, [] = none
 
 [server]
 urls   = ["http://192.168.0.123/stats.php", "http://rayaz.netbird.cloud/stats.php"]
@@ -16,22 +16,26 @@ token  = ""
 interval = 1.0
 timeout = 1.5
 retry_primary = 20
-name = ""
+name           = ""                 # shown instead of the server's hostname
+system_label   = "System"
+system_path    = ""                 # "" = the server's own setting (normally "/")
+storage_paths  = []                 # e.g. ["/raids", "/mnt/media"]; [] = what the server is set up for / detects
+storage_labels = []                 # names for those paths, same order ("" = automatic)
+net_interfaces = []                 # e.g. ["enp3s0"]; [] = all physical network cards
+show_uptime = true                  # also show_cpu_clock, show_cpu, show_temp, show_ram, show_swap, show_system, show_storage, show_network
+
+[pc]                                # PC Stats column: true / false per row
+show_cpu = true                     # CPU usage bar
+show_cpu_clock = true
+show_cpu_temp = true
 show_uptime = true
-show_cpu = true
-show_clock = true
-show_temperature = true
+show_gpu_use = true                 # GPU utilisation + clock
+show_gpu_temp = true
+show_vram = true                    # only cards with their own memory have this row anyway
 show_ram = true
-show_swap = true
+show_disk = true
+show_battery = true                 # only laptops have this row anyway
 show_network = true
-show_system_disk = true
-system_label = "System"
-system_path = ""
-storage_paths  = []          # [] = automatic
-storage_labels = []
-max_storage_rows = 3
-raid_label = "RAID"
-net_interfaces = []
 
 [weather]
 display_name = "Dhaka, Bangladesh"
@@ -60,15 +64,14 @@ height = 475
 | `server.retry_primary` | while on a fallback address, how often (seconds) to test the first one again. |
 | `server.timeout` | seconds before an address counts as down (probes of the preferred address use at most 1 s). |
 | `server.token` | sent as `?key=…`; must match `token` in the server's `stats.config.php`. |
-| `general.weekend` | days drawn in red, any of `"mon"` … `"sun"`; `[]` = none. Default `["fri", "sat"]`. |
-| `general.week_start` | first calendar column: `"sunday"` (default), `"monday"`, `"saturday"` … |
-| `server.name` | text shown instead of the server's hostname. |
-| `server.show_*` | `true` / `false` for each row: `uptime`, `cpu`, `clock`, `temperature`, `ram`, `swap`, `network`, `system_disk`. |
-| `server.system_label`, `server.system_path` | name of the system-disk row; its mount point on the server (`""` = the server's default). |
-| `server.storage_paths`, `server.storage_labels` | extra storage rows: mount points **as the server sees them** (inside Docker: the path inside the container) and a name for each. A path inside a mount (`/raids/photos`) shows that mount. A path that is not found shows "Not found". `[]` = automatic. |
-| `server.max_storage_rows` | automatic mode: how many extra disks / pools to show at most. |
-| `server.raid_label` | automatic mode: name for RAID / ZFS / btrfs / mergerfs rows. mdadm arrays also get a health line. |
-| `server.net_interfaces` | network cards to count, e.g. `["enp3s0"]`; `[]` = all physical cards. |
+| `general.week_start` / `general.weekend` | First calendar column and the red days. Countries differ: `["sat", "sun"]`, `["fri"]`, `[]` all work. |
+| `server.storage_paths` | Folders on the **server** to show as storage bars (up to 4). Sent to `stats.php` with every request. Empty = the server's own `raid_paths` / auto-detect. An unreachable path is shown as *Not reachable*. |
+| `server.storage_labels` | Names for those rows. Empty = automatic (*RAID*, *ZFS*, folder name). |
+| `server.system_path` / `system_label` | Which disk the *System* row measures, and its name. |
+| `server.net_interfaces` | Network cards whose traffic is summed. Empty = all physical cards. |
+| `server.name` | Text shown in the first title bar instead of the server's hostname. |
+| `server.show_*` | Hide any row you do not want: `uptime`, `cpu_clock`, `cpu`, `temp`, `ram`, `swap`, `system`, `storage`, `network`. A block with nothing left disappears with its heading. |
+| `pc.show_*` | The same for the PC Stats column: `cpu`, `cpu_clock`, `cpu_temp`, `uptime`, `gpu_use`, `gpu_temp`, `vram`, `ram`, `disk`, `battery`, `network`. Also in `stats-widget config` → *PC data*. A hidden GPU block is not read at all (no `nvidia-smi` calls, a sleeping laptop GPU is left alone). |
 | `weather.*` | Open-Meteo, no key. `stats-widget config` → Weather has a city search that fills in the coordinates. |
 | `position.anchor` | `top left`, `top center`, `top right`, `center left`, `center`, `center right`, `bottom left`, `bottom center`, `bottom right`. |
 | `position.x / y` | pixels from the anchored edge. |
@@ -79,8 +82,9 @@ height = 475
 
 > Python < 3.11 uses a small built-in TOML reader: keep arrays on **one line**.
 
-## Taller widget for more rows
-Each extra storage row needs about 25 px (a bar row) and an mdadm health line another 21 px. The default 795 × 475 has room for about one extra row; if you show more, raise the height in `stats-widget config` → *Look & Size*.
+> Extra storage rows need vertical room: with more than one the whole layout is shrunk a little so it still fits the window
+> (raise *Size %* to compensate). Hidden rows give the room back.
+> The server may refuse widget-chosen paths (`allow_client_config = false` in `stats.config.php`); then the server's own settings apply.
 
 ## Moving the widget
 Right-click the widget → drag the ghost → **Enter** (or double-click) to save, **Esc** to cancel, arrow keys nudge (Shift = 10 px).

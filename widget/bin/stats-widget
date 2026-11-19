@@ -71,11 +71,17 @@ doctor() {
 import sys; sys.path.insert(0, sys.argv[1])
 import common, server
 s = common.load_config()["server"]
+params = server.server_params(s)
 for i, u in enumerate(s["urls"]):
     try:
-        d = server.fetch(u, s["token"], float(s["timeout"]))
-        disks = d.get("disks") if isinstance(d, dict) else None
-        extra = f"  ({len(disks)} disks reported)" if isinstance(disks, list) else "  (old stats.php: update it to choose storage rows and see the CPU clock)"
+        d = server.fetch(u, s["token"], float(s["timeout"]), params)
+        pools = d.get("storage") if isinstance(d, dict) and isinstance(d.get("storage"), list) else None
+        extra = ""
+        if params and isinstance(d, dict) and d.get("client_config") is not True:
+            extra = "  (server ignores the Server data settings: old stats.php or allow_client_config off)"
+        elif pools is not None:
+            bad = [p.get("path") for p in pools if not p.get("ok")]
+            extra = f"  storage: {len(pools) - len(bad)} ok" + (f", NOT FOUND: {', '.join(map(str, bad))}" if bad else "")
         print(f"    \033[32m✓\033[0m {u}  host={d.get('host','?')}{extra}")
     except Exception as e:
         print(f"    \033[31m✗\033[0m {u}  {getattr(e,'reason',e)}")

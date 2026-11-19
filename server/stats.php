@@ -3,7 +3,7 @@
  * Stats Widget - server endpoint
  * https://github.com/TechZeeLand/Stats-Widget
  *
- * Returns the server's CPU / RAM / disk / RAID / network numbers as JSON.
+ * Returns the server's CPU / RAM / disk / storage-pool / network numbers as JSON.
  * Drop this file on any web server with PHP 7.4+ (Linux host).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -19,14 +19,15 @@ $CONFIG = [
     'sys_root'       => '/sys',
     'mounts_file'    => null,      // null = <proc_root>/mounts  (or <proc_root>/1/mounts when readable)
     'system_path'    => '/',       // the "SSD / system disk" row
-    'raid_paths'     => ['/raids'],// mount points shown as the RAID row (first one wins); [] = auto-detect only
-    'auto_detect'    => true,      // also look for md / ZFS / btrfs / mergerfs mounts when raid_paths fails
+    'raid_paths'     => ['/raids'],// mount points shown as storage rows (RAID, ZFS pool, a data disk ...); [] = auto-detect only
+    'auto_detect'    => true,      // also look for md / ZFS / btrfs / mergerfs mounts when none of raid_paths works
     'net_interfaces' => [],        // [] = auto (all physical NICs); or e.g. ['eth0']
     'hostname'       => null,      // null = detect
     'cpu_sample_ms'  => 100,       // how long CPU usage is measured (50-1000)
     'token'          => '',        // non-empty = callers must add  ?key=<token>
     'allow_origin'   => '',        // CORS header, normally not needed
-    'allow_client_settings' => true, // true = the widget may choose the system disk and network cards (?system=, ?net=)
+    'allow_client_config' => true, // true = the widget may choose system_path / storage paths / network cards per request
+                                   // (stats.php?paths[]=/raids&system=/&nic[]=eth0, validated); false = only this file decides
 ];
 if (is_file(__DIR__ . '/stats.config.php')) {
     $user = require __DIR__ . '/stats.config.php';
@@ -37,7 +38,7 @@ if (is_file(__DIR__ . '/stats.config.php')) {
 // Environment variables win over the file (handy in Docker / Portainer, where no config file is mounted):
 //   STATS_PROC_ROOT, STATS_SYS_ROOT, STATS_MOUNTS_FILE, STATS_SYSTEM_PATH, STATS_HOSTNAME, STATS_TOKEN, STATS_ALLOW_ORIGIN,
 //   STATS_RAID_PATHS and STATS_NET_INTERFACES (comma separated), STATS_AUTO_DETECT (0/1), STATS_CPU_SAMPLE_MS,
-//   STATS_ALLOW_CLIENT_SETTINGS (0/1)
+//   STATS_ALLOW_CLIENT_CONFIG (0/1)
 foreach ([
     'STATS_PROC_ROOT'      => ['proc_root', 'str'],
     'STATS_SYS_ROOT'       => ['sys_root', 'str'],
@@ -50,7 +51,7 @@ foreach ([
     'STATS_NET_INTERFACES' => ['net_interfaces', 'list'],
     'STATS_AUTO_DETECT'    => ['auto_detect', 'bool'],
     'STATS_CPU_SAMPLE_MS'  => ['cpu_sample_ms', 'int'],
-    'STATS_ALLOW_CLIENT_SETTINGS' => ['allow_client_settings', 'bool'],
+    'STATS_ALLOW_CLIENT_CONFIG' => ['allow_client_config', 'bool'],
 ] as $envName => [$key, $type]) {
     $raw = getenv($envName);
     if ($raw === false || trim($raw) === '') {
@@ -105,6 +106,67 @@ function disk_usage(string $path): array
         return [0.0, 0.0, 'PHP cannot read the size (permissions or open_basedir)'];
     }
     return [round(($total - $free) / 1024 ** 3, 1), round($total / 1024 ** 3, 1), null];
+}
+
+// ───────────────────────── SETTINGS FROM THE WIDGET ─────────────────────────
+/** An absolute path sent by the widget: no "..", no control characters, at most 255 bytes. null = rejected. */
+function safe_path($p): ?string
+{
+    if (!is_string($p)) {
+        return null;
+    }
+    $p = trim($p);
+    if ($p === '' || strlen($p) > 255 || $p[0] !== '/' || preg_match('/[\x00-\x1f]/', $p) || preg_match('#(^|/)\.\.(/|$)#', $p)) {
+        return null;
+    }
+    return $p === '/' ? '/' : rtrim($p, '/');
+}
+
+/** A network-card name sent by the widget (eth0, enp3s0, br0.10 ...). null = rejected. */
+function safe_nic($n): ?string
+{
+    return is_string($n) && preg_match('/^[A-Za-z0-9_.:@-]{1,32}$/', $n) ? $n : null;
+}
+
+/** "a,b" or ['a','b'] -> cleaned unique list (at most $max) or null when nothing valid is left. */
+function request_list($value, callable $clean, int $max): ?array
+{
+    if (is_string($value)) {
+        $value = explode(',', $value);
+    }
+    if (!is_array($value)) {
+        return null;
+    }
+    $out = [];
+    foreach ($value as $v) {
+        $v = $clean($v);
+        if ($v !== null && !in_array($v, $out, true)) {
+            $out[] = $v;
+        }
+        if (count($out) >= $max) {
+            break;
+        }
+    }
+    return $out ?: null;
+}
+
+/**
+ * What the widget asked for:  ?paths[]=/raids&paths[]=/mnt/media  &system=/  &nic[]=enp3s0
+ * Ignored completely when allow_client_config is false. Only existing keys are read, every value is validated,
+ * and the answer only ever contains disk sizes, so the worst a caller can learn is "this folder exists".
+ */
+function client_overrides(array $c, ?array $query = null): array
+{
+    $q = $query ?? $_GET;
+    $o = ['paths' => null, 'system' => null, 'nic' => null];
+    if (empty($c['allow_client_config'])) {
+        return $o;
+    }
+    $o['paths']  = request_list($q['paths'] ?? null, 'safe_path', 6);
+    $o['nic']    = request_list($q['nic'] ?? null, 'safe_nic', 8);
+    $sys         = request_list($q['system'] ?? null, 'safe_path', 1);
+    $o['system'] = $sys[0] ?? null;
+    return $o;
 }
 
 // ───────────────────────── CPU ─────────────────────────
@@ -166,27 +228,29 @@ function cpu_temperature(string $sys): float
     return 0.0;
 }
 
-/** Current CPU clock in MHz, averaged over all cores (cpufreq when available, else "cpu MHz" in /proc/cpuinfo). 0 = unknown. */
-function cpu_clock_mhz(string $proc, string $sys): float
+/** Current and maximum CPU clock in MHz -> [avg_current, max]; [0, 0] when the machine does not tell. */
+function cpu_clock(string $proc, string $sys): array
 {
-    $sum = 0.0;
-    $n = 0;
-    foreach (glob("$sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq") ?: [] as $file) {
-        $raw = slurp($file);
+    $cur = $max = [];
+    foreach (glob("$sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq") ?: [] as $f) {
+        $raw = slurp($f);
         if ($raw !== null && (float)$raw > 0) {
-            $sum += (float)$raw / 1000;
-            $n++;
+            $cur[] = (float)$raw / 1000;
         }
     }
-    if ($n === 0 && preg_match_all('/^cpu MHz\s*:\s*([\d.]+)/m', (string)slurp("$proc/cpuinfo"), $m)) {
-        foreach ($m[1] as $mhz) {
-            if ((float)$mhz > 0) {
-                $sum += (float)$mhz;
-                $n++;
-            }
+    foreach (glob("$sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq") ?: [] as $f) {
+        $raw = slurp($f);
+        if ($raw !== null && (float)$raw > 0) {
+            $max[] = (float)$raw / 1000;
         }
     }
-    return $n > 0 ? round($sum / $n) : 0.0;
+    if (!$cur && preg_match_all('/^cpu MHz\s*:\s*([\d.]+)/m', (string)slurp("$proc/cpuinfo"), $m)) {   // VMs, old kernels
+        $cur = array_map('floatval', $m[1]);
+    }
+    if (!$cur) {
+        return [0.0, 0.0];
+    }
+    return [round(array_sum($cur) / count($cur)), $max ? round(max($max)) : 0.0];
 }
 
 // ───────────────────────── CPU NAME ─────────────────────────
@@ -303,7 +367,7 @@ function real_disks(array $mounts): array
         $seen[$key] = true;
         $res[] = $m;
     }
-    return array_slice($res, 0, 16);
+    return array_slice($res, 0, 8);
 }
 
 /** Exact byte sizes of the filesystem at $path -> [total, free] or null. */
@@ -376,51 +440,132 @@ function network(array $c): array
             $used[] = $name;
         }
     }
-    return ['net_rx' => $rx, 'net_tx' => $tx, 'net_iface' => implode(',', $used)];
+    // net_t = the moment the counters were read, so the widget can compute speeds without our network latency
+    return ['net_rx' => $rx, 'net_tx' => $tx, 'net_iface' => implode(',', $used), 'net_t' => round(microtime(true), 3)];
 }
 
-// ───────────────────────── SETTINGS SENT BY THE WIDGET ─────────────────────────
-/**
- * The widget may ask for  ?system=<mount point>  and  ?net=eth0,eth1.  Only values that exist on this server are
- * accepted (the system path must be a mount point from the mount table), so nobody can probe arbitrary folders.
- * Switch it off with  'allow_client_settings' => false  (or STATS_ALLOW_CLIENT_SETTINGS=0).
- */
-function apply_client_settings(array $c, array $get): array
+// ───────────────────────── STORAGE POOLS ─────────────────────────
+/** 'raid' for a /dev/mdN mount, 'zfs' / 'btrfs' / 'mergerfs' by file system, otherwise a plain 'disk'. */
+function pool_kind(?array $entry): string
 {
-    if (empty($c['allow_client_settings'])) {
-        return $c;
+    if ($entry === null) {
+        return 'disk';
     }
-    $system = isset($get['system']) && is_string($get['system']) ? trim($get['system']) : '';
-    if ($system !== '') {
-        foreach (read_mounts($c) as $m) {
-            if ($m['mount'] === $system) {
-                $c['system_path'] = $system;
+    if (strpos($entry['dev'], '/dev/md') === 0) {
+        return 'raid';
+    }
+    return ['zfs' => 'zfs', 'btrfs' => 'btrfs', 'fuse.mergerfs' => 'mergerfs', 'mergerfs' => 'mergerfs',
+            'fuse.unionfs' => 'mergerfs'][$entry['fs']] ?? 'disk';
+}
+
+/** The /proc/mdstat array that backs a mount (by its /dev/mdN device), or null. */
+function md_for_entry(?array $entry, array $arrays): ?array
+{
+    if ($entry === null) {
+        return null;
+    }
+    $dev = (string)(@realpath($entry['dev']) ?: $entry['dev']);          // /dev/md/data -> /dev/md127
+    if (!preg_match('#^/dev/(md\d+)#', $dev, $m)) {
+        return null;
+    }
+    foreach ($arrays as $a) {
+        if ($a['name'] === $m[1]) {
+            return $a;
+        }
+    }
+    return null;
+}
+
+/** Look at one candidate path: size, kind, the md array behind it, and whether it is just the system disk again. */
+function probe_pool(string $path, array $c, array $mounts, array $arrays): array
+{
+    $entry = mount_for($path, $mounts);
+    $pool  = ['path' => $path, 'kind' => pool_kind($entry), 'ok' => false, 'same_disk' => false, 'error' => null,
+              'used' => 0.0, 'total' => 0.0, 'percent' => 0.0, 'md' => md_for_entry($entry, $arrays)];
+    [$u, $t, $err] = disk_usage($path);
+    if ($err !== null) {
+        $pool['error'] = $err;
+    } elseif (is_system_disk($path, $c['system_path'], $mounts)) {
+        $pool['same_disk'] = true;
+        $pool['error']     = 'same disk as the system path (no separate RAID/pool there)';
+    } else {
+        $pool = array_merge($pool, ['ok' => true, 'used' => $u, 'total' => $t, 'percent' => pct($u, $t)]);
+    }
+    return $pool;
+}
+
+/**
+ * The storage rows. $explicit = paths the widget asked for: exactly those are shown, an unreachable one as an error
+ * row (you asked for it, so a missing mount should be visible). Without it the server's own raid_paths are used and
+ * a missing one stays quiet, unless a RAID exists that we cannot reach.
+ */
+function storage_pools(array $c, array $mounts, array $arrays, ?array $explicit, array &$notes): array
+{
+    $shown = $failed = [];
+    foreach ($explicit ?? $c['raid_paths'] as $path) {
+        $pool = probe_pool((string)$path, $c, $mounts, $arrays);
+        if ($pool['same_disk']) {
+            $notes[] = "$path: {$pool['error']}";
+            continue;
+        }
+        if (!$pool['ok']) {
+            $notes[] = "$path: {$pool['error']}";
+            $failed[] = $pool;
+        }
+        if ($pool['ok'] || $explicit !== null) {
+            $shown[] = $pool;
+        }
+    }
+    if (!$shown && $explicit === null && $c['auto_detect']) {
+        $tried = [];
+        foreach ($mounts as $m) {
+            if (!is_array_mount($m) || in_array($m['mount'], $tried, true) || in_array($m['mount'], $c['raid_paths'], true)
+                || $m['mount'] === $c['system_path'] || preg_match('#^/(boot|run|var/lib)#', $m['mount'])) {
+                continue;
+            }
+            $tried[] = $m['mount'];
+            $pool = probe_pool($m['mount'], $c, $mounts, $arrays);
+            if ($pool['ok']) {
+                $shown[] = $pool;
+            } elseif (!$pool['same_disk']) {
+                $notes[] = "{$m['mount']}: {$pool['error']}";
+            }
+            if (count($shown) >= 4) {
                 break;
             }
         }
     }
-    $net = isset($get['net']) && is_string($get['net']) ? trim($get['net']) : '';
-    if ($net !== '') {
-        $c['net_interfaces'] = array_slice(array_values(array_filter(array_map('trim', explode(',', $net)), 'strlen')), 0, 8);
+    if (!$shown && $failed && $arrays) {
+        $shown[] = $failed[0];        // a RAID exists, but its mount cannot be read: show that instead of hiding it
     }
-    return $c;
+    return array_slice($shown, 0, 6);
 }
 
 // ───────────────────────── BUILD THE ANSWER ─────────────────────────
-function collect(array $c): array
+function collect(array $c, array $client = []): array
 {
+    if (!empty($client['system'])) {
+        $c['system_path'] = $client['system'];
+    }
+    if (!empty($client['nic'])) {
+        $c['net_interfaces'] = $client['nic'];
+    }
     $proc = $c['proc_root'];
+    [$mhz, $mhzMax] = cpu_clock($proc, $c['sys_root']);
     $out = [
-        'version'  => 2,
+        'version'  => 3,
         'host'     => $c['hostname'] ?? (trim((string)slurp("$proc/sys/kernel/hostname")) ?: (string)gethostname()),
         'time'     => time(),
         'uptime'   => (int)floatval((string)slurp("$proc/uptime")),
-        'cores'    => max(1, preg_match_all('/^processor\s*:/m', (string)slurp("$proc/cpuinfo"))),
+        'cores'    => max(1, (int)preg_match_all('/^processor\s*:/m', (string)slurp("$proc/cpuinfo"))),
         'load'     => array_map('floatval', array_slice(explode(' ', (string)slurp("$proc/loadavg")), 0, 3)),
         'cpu'      => cpu_percent($proc, (int)$c['cpu_sample_ms']),
-        'cpu_mhz'  => cpu_clock_mhz($proc, $c['sys_root']),
+        'cpu_mhz'  => $mhz,
+        'cpu_mhz_max' => $mhzMax,
         'temp'     => cpu_temperature($c['sys_root']),
         'cpu_name' => cpu_name($proc),
+        'client_config' => (bool)$c['allow_client_config'],
+        'applied'  => array_keys(array_filter($client, fn($v) => $v !== null)),
     ];
     $out += meminfo($proc);
 
@@ -428,7 +573,7 @@ function collect(array $c): array
     [$u, $t, $err] = disk_usage($c['system_path']);
     $out += ['ssd_u' => $u, 'ssd_t' => $t, 'ssd_p' => pct($u, $t)];
 
-    // disks + RAID
+    // every real disk (the widget's "find on server" button lists these) + the storage pools
     $mounts = read_mounts($c);
     $disks = [];
     foreach (real_disks($mounts) as $m) {
@@ -436,43 +581,26 @@ function collect(array $c): array
         if ($derr === null) {
             $disks[] = ['mount' => $m['mount'], 'dev' => $m['dev'], 'fs' => $m['fs'],
                         'used' => $du, 'total' => $dt, 'percent' => pct($du, $dt), 'array' => is_array_mount($m),
-                        'md' => preg_match('#^/dev/(md\d+)$#', $m['dev'], $mdm) ? $mdm[1] : null,
                         'system' => $m['mount'] === $c['system_path'] || is_system_disk($m['mount'], $c['system_path'], $mounts)];
         }
     }
-    $raid = ['path' => null, 'ok' => false, 'present' => false, 'error' => null, 'arrays' => parse_mdstat(slurp("$proc/mdstat"))];
-    $candidates = $c['raid_paths'];
-    if ($c['auto_detect']) {
-        foreach ($mounts as $m) {
-            if (is_array_mount($m) && !in_array($m['mount'], $candidates, true) && $m['mount'] !== $c['system_path']
-                && !preg_match('#^/(boot|run|var/lib)#', $m['mount'])) {
-                $candidates[] = $m['mount'];
-            }
-        }
-    }
-    $errors = [];
-    foreach ($candidates as $path) {
-        [$ru, $rt, $rerr] = disk_usage($path);
-        if ($rerr === null && is_system_disk($path, $c['system_path'], $mounts)) {
-            $errors[] = "$path: same disk as the system path (no separate RAID/pool there)";
-            continue;
-        }
-        if ($rerr === null) {
-            $raid['path'] = $path;
-            $raid['ok'] = true;
-            $raid['present'] = true;
-            $out += ['raid_u' => $ru, 'raid_t' => $rt, 'raid_p' => pct($ru, $rt)];
-            break;
-        }
-        $errors[] = "$path: $rerr";
-    }
-    if (!$raid['ok']) {
-        $raid['error'] = $errors ? implode('; ', $errors) : 'no RAID path configured or detected';
-        $raid['present'] = false;
-        $out += ['raid_u' => 0, 'raid_t' => 0, 'raid_p' => 0];
-    }
-    $out['raid']  = $raid;
-    $out['disks'] = $disks;
+    $arrays = parse_mdstat(slurp("$proc/mdstat"));
+    $notes  = [];
+    $pools  = storage_pools($c, $mounts, $arrays, $client['paths'] ?? null, $notes);
+    $first  = $pools[0] ?? null;
+
+    // the v2 "raid" object and raid_* numbers stay: older widgets read them
+    $out += ['raid_u' => $first && $first['ok'] ? $first['used'] : 0, 'raid_t' => $first && $first['ok'] ? $first['total'] : 0,
+             'raid_p' => $first && $first['ok'] ? $first['percent'] : 0];
+    $out['raid'] = [
+        'path'    => $first['path'] ?? null,
+        'ok'      => (bool)($first['ok'] ?? false),
+        'present' => (bool)($first['ok'] ?? false),
+        'error'   => ($first['ok'] ?? false) ? null : ($first['error'] ?? ($notes ? implode('; ', $notes) : 'no RAID path configured or detected')),
+        'arrays'  => $arrays,
+    ];
+    $out['storage'] = array_map(fn($p) => array_diff_key($p, ['same_disk' => 1]), $pools);
+    $out['disks']   = $disks;
     return $out + network($c);
 }
 
@@ -503,6 +631,10 @@ if (isset($_GET['debug'])) {
         }
     }
     $diag['cpu_name'] = cpu_name($CONFIG['proc_root']);
+    $diag['cpu_clock_mhz'] = cpu_clock($CONFIG['proc_root'], $CONFIG['sys_root']);
+    $diag['widget_settings'] = $CONFIG['allow_client_config']
+        ? array_filter(client_overrides($CONFIG), fn($v) => $v !== null) ?: 'allowed (the widget sent none)'
+        : 'not allowed (allow_client_config is false): the widget cannot change paths';
     if ($diag['in_docker']) {
         $diag['hints'][] = 'Running in Docker: the RAID must be mounted INTO this container (volume /your/host/raid:/raids:ro, see docs/SERVER_SETUP.md). '
             . 'Optional: for host-wide mounts also mount /proc (-v /proc:/host/proc:ro) and set STATS_PROC_ROOT=/host/proc.';
@@ -514,4 +646,4 @@ if (isset($_GET['debug'])) {
     exit;
 }
 
-echo json_encode(collect(apply_client_settings($CONFIG, $_GET)), JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+echo json_encode(collect($CONFIG, client_overrides($CONFIG)), JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);

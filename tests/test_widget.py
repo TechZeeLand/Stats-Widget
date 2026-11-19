@@ -81,6 +81,10 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(common.fmt(12.35, 1), "12.3" if f"{12.35:.1f}" == "12.3" else "12.4")
 
 
+SCFG = {"labels": [], "system_label": "System", "storage_paths": [], "storage_labels": ["RAID"],
+        "show_storage": True, "net_interfaces": [], "system_path": ""}
+
+
 class ServerLogicTests(unittest.TestCase):
     def setUp(self):
         import server
@@ -89,7 +93,7 @@ class ServerLogicTests(unittest.TestCase):
     def test_raid_status(self):
         s = self.server.raid_status
         ok = {"ok": True, "arrays": [{"name": "md0", "level": "raid5", "devices": 4, "working": 4, "health": "ok"}]}
-        self.assertEqual(s(ok, True)[1], "ok")
+        self.assertEqual(s(ok, True), ("raid5 · 4/4 disks · healthy", "ok"))
         bad = {"ok": True, "arrays": [{"name": "md0", "level": "raid5", "devices": 4, "working": 3, "health": "degraded"}]}
         text, cls = s(bad, True)
         self.assertEqual(cls, "bad")
@@ -100,139 +104,110 @@ class ServerLogicTests(unittest.TestCase):
         self.assertEqual(s({"ok": False, "error": "x", "arrays": []}, False), ("Not reachable", "bad"))
         self.assertEqual(s({"ok": True, "arrays": []}, True), ("Online", "ok"))
 
-    def test_build_handles_old_and_new_payloads(self):
-        cfg = common.DEFAULTS["server"]
+    def test_old_v2_payload_still_works(self):
         old = {"cpu": 10, "temp": 40, "ram_u": 4, "ram_t": 16, "ram_p": 25, "raid_u": 100, "raid_t": 1000,
                "raid_p": 10, "ssd_u": 1, "ssd_t": 2, "ssd_p": 50, "net_rx": "1", "net_tx": "1"}
-        out = self.server.build(old, "Home", "h", (1.0, 2.0), cfg)
-        rows = {r["n"]: r for sec in out["sections"] for r in sec["rows"]}
-        self.assertEqual(rows["RAID:"]["v"], "100 / 1000 GB")             # old server: single legacy RAID pool
-        self.assertEqual(rows["Download:"]["v"], "1.00 Mbps")
-        self.assertEqual(rows["Clock:"]["v"], "N/A")                      # old server has no clock
-        new = dict(old, host="rayaz", uptime=90061, load=[0.1, 0.2, 0.3],
-                   raid={"ok": False, "error": "nope", "arrays": []})
-        out = self.server.build(new, "Home", "h", (0, 0), cfg)
-        rows = {r["n"]: r for sec in out["sections"] for r in sec["rows"]}
-        self.assertEqual(rows["RAID:"]["v"], "N/A")
-        self.assertEqual(rows["Status:"]["c"], "bad")
+        out = self.server.build(old, "Home", "h", (1.0, 2.0), SCFG)
+        self.assertEqual([r["val"] for r in out["storage"]], ["100 / 1000 GB"])
+        self.assertEqual(out["storage"][0]["name"], "RAID:")          # the migrated v0.3 label
+        self.assertEqual(out["down"], "1.00 Mbps")
+        self.assertEqual(out["clock"], "N/A")                          # old server: no cpu_mhz
+        new = dict(old, host="rayaz", uptime=90061, raid={"ok": False, "error": "nope", "arrays": []})
+        out = self.server.build(new, "Home", "h", (0, 0), SCFG)
+        self.assertEqual(out["storage"][0]["val"], "N/A")
+        self.assertEqual(out["storage"][0]["cls"], "bad")
         self.assertEqual(out["title"], "rayaz · Home")
-        self.assertEqual(out["head"][0]["v"], "1d 1h 1m")
+        self.assertEqual(out["uptime"], "1d 1h 1m")
 
-    def test_load_average_is_gone_and_clock_is_there(self):
-        data = {"cpu": 5, "cpu_mhz": 3412, "load": [1, 2, 3], "ram_t": 8, "uptime": 5}
-        out = self.server.build(data, "Home", "h", (0, 0), common.DEFAULTS["server"])
-        names = [r["n"] for r in out["head"]] + [r["n"] for sec in out["sections"] for r in sec["rows"]]
-        self.assertNotIn("Load average:", names)
-        self.assertIn("3.41 GHz", [r["v"] for sec in out["sections"] for r in sec["rows"]])
-
-    def test_every_row_can_be_switched_off(self):
-        cfg = dict(common.DEFAULTS["server"], **{k: False for k in (
-            "show_uptime", "show_cpu", "show_clock", "show_temperature", "show_ram", "show_swap",
-            "show_network", "show_system_disk")})
-        out = self.server.build({"cpu": 5, "ram_t": 8}, "Home", "h", (0, 0), cfg)
-        self.assertEqual(out["head"], [])
-        self.assertEqual(out["sections"], [])                  # sections without rows disappear
-        cfg["show_network"] = True
-        out = self.server.build({"cpu": 5, "ram_t": 8}, "Home", "h", (0, 0), cfg)
-        self.assertEqual([s["t"] for s in out["sections"]], ["Network"])
-
-    def test_offline_reads_na_everywhere(self):
-        out = self.server.build(None, "", "", None, common.DEFAULTS["server"])
-        self.assertFalse(out["ok"])
-        for row in out["head"] + [r for sec in out["sections"] for r in sec["rows"]]:
-            self.assertEqual(row["v"], "N/A", row)
-
-    def test_custom_server_name(self):
-        cfg = dict(common.DEFAULTS["server"], name="Homelab")
-        out = self.server.build({"host": "rayaz", "ram_t": 8}, "Home", "h", (0, 0), cfg)
-        self.assertEqual(out["title"], "Homelab · Home")
-
-    def test_request_params(self):
-        self.assertEqual(self.server.request_params({"system_path": " /data ", "net_interfaces": ["a", " b ", ""]}),
-                         {"system": "/data", "net": "a,b"})
-        self.assertEqual(self.server.request_params(common.DEFAULTS["server"]), {"system": "", "net": ""})
-
-
-DISKS = [
-    {"mount": "/", "dev": "/dev/nvme0n1p2", "fs": "ext4", "used": 212, "total": 466, "percent": 45.5, "array": False, "system": True, "md": None},
-    {"mount": "/raids", "dev": "/dev/md0", "fs": "ext4", "used": 6700, "total": 10900, "percent": 61.5, "array": True, "system": False, "md": "md0"},
-    {"mount": "/mnt/media", "dev": "/dev/sdf1", "fs": "ext4", "used": 100, "total": 2000, "percent": 5, "array": False, "system": False, "md": None},
-]
-ARRAYS = [{"name": "md0", "level": "raid1", "devices": 2, "working": 2, "health": "ok"}]
-
-
-class StorageRowTests(unittest.TestCase):
-    def setUp(self):
-        import server
-        self.server = server
-
-    def rows(self, disks, **over):
-        data = {"ram_t": 8, "ssd_u": 212, "ssd_t": 466, "ssd_p": 45.5, "disks": disks,
-                "raid": {"present": True, "ok": True, "arrays": ARRAYS}}
-        cfg = dict(common.DEFAULTS["server"], **over)
-        out = self.server.build(data, "Home", "h", (0, 0), cfg)
-        return [r for sec in out["sections"] if sec["t"] == "Storage" for r in sec["rows"]]
-
-    def test_automatic_shows_system_then_every_other_disk(self):
-        rows = self.rows(DISKS)
-        self.assertEqual([r["n"] for r in rows], ["System:", "RAID:", "Status:", "media:"])
-        self.assertEqual(rows[2]["c"], "ok")                       # the mdadm health line
-
-    def test_no_raid_and_no_other_disk_means_only_the_system_row(self):
-        self.assertEqual([r["n"] for r in self.rows(DISKS[:1])], ["System:"])
-
-    def test_disk_on_the_system_disk_is_not_repeated(self):
-        same = dict(DISKS[1], dev="/dev/nvme0n1p2", array=False, md=None, system=True)   # Docker bind mount of the system disk
-        self.assertEqual([r["n"] for r in self.rows([DISKS[0], same])], ["System:"])
-
-    def test_custom_list_with_labels_and_missing_path(self):
-        rows = self.rows(DISKS, storage_paths=["/mnt/media", "/nope"], storage_labels=["Media"], raid_label="X")
-        self.assertEqual([(r["n"], r["v"]) for r in rows[1:]], [("Media:", "0.1 / 2 TB"), ("nope:", "Not found")])
-        self.assertEqual(rows[2]["c"], "bad")
-
-    def test_custom_path_inside_a_mount_uses_that_mount(self):
-        rows = self.rows(DISKS, storage_paths=["/raids/photos"], storage_labels=["Photos"])
-        self.assertEqual(rows[1]["n"], "Photos:")
-        self.assertEqual(rows[1]["p"], 61.5)
-
-    def test_names_and_limits(self):
-        rows = self.rows(DISKS, raid_label="Pool", system_label="OS", max_storage_rows=1)
-        self.assertEqual([r["n"] for r in rows], ["OS:", "Pool:", "Status:"])     # arrays first, only 1 extra disk
-        self.assertEqual([r["n"] for r in self.rows(DISKS, show_system_disk=False, max_storage_rows=0)], [])
-
-    def test_raid_status_row_for_degraded_array(self):
-        bad = [dict(ARRAYS[0], working=1, health="degraded")]
-        data = {"ram_t": 8, "disks": DISKS, "raid": {"present": True, "ok": True, "arrays": bad}}
-        out = self.server.build(data, "Home", "h", (0, 0), common.DEFAULTS["server"])
-        status = [r for sec in out["sections"] for r in sec["rows"] if r["n"] == "Status:"][0]
-        self.assertEqual(status["c"], "bad")
-
-
-class RaidAndCpuNameTests(unittest.TestCase):
-    def setUp(self):
-        import server
-        self.server = server
-        self.cfg = common.DEFAULTS["server"]
-
-    def names(self, out):
-        return [r["n"] for sec in out["sections"] for r in sec["rows"]]
-
-    def test_no_separate_pool_hides_raid_row(self):
+    def test_no_separate_pool_hides_storage_rows(self):
         data = {"cpu": 1, "ram_t": 8, "cpu_name": "Intel Core i3-6100", "raid_u": 0, "raid_t": 0, "raid_p": 0,
                 "raid": {"present": False, "ok": False, "error": "same disk", "arrays": []}}
-        out = self.server.build(data, "Home", "h", (0, 0), self.cfg)
-        self.assertNotIn("RAID:", self.names(out))
-        self.assertEqual(out["sections"][0]["t"], "Intel Core i3-6100")
+        out = self.server.build(data, "Home", "h", (0, 0), SCFG)
+        self.assertEqual(out["storage"], [])
+        self.assertEqual(out["cpu_name"], "Intel Core i3-6100")
 
-    def test_old_server_keeps_raid_row(self):
-        out = self.server.build({"cpu": 1, "ram_t": 8, "raid_t": 100, "raid_u": 1, "raid_p": 1}, "Home", "h", (0, 0), self.cfg)
-        self.assertIn("RAID:", self.names(out))
-        self.assertEqual(out["sections"][0]["t"], "CPU & Memory")
+    def test_load_average_is_gone_and_cpu_clock_is_there(self):
+        out = self.server.build({"ram_t": 8, "load": [1, 2, 3], "cpu_mhz": 2840, "cpu_mhz_max": 4600}, "H", "h", (0, 0), SCFG)
+        self.assertNotIn("load", out)
+        self.assertEqual(out["clock"], "2.84 / 4.60 GHz")
 
-    def test_real_array_keeps_row(self):
-        raid = {"present": True, "ok": True, "arrays": [{"name": "md0", "level": "raid1", "devices": 2, "working": 2, "health": "ok"}]}
-        out = self.server.build({"ram_t": 8, "raid_t": 1000, "raid_u": 1, "raid": raid}, "Home", "h", (0, 0), self.cfg)
-        self.assertIn("RAID:", self.names(out))
+    def test_two_pools_with_names_and_health(self):
+        data = {"ram_t": 8, "storage": [
+            {"path": "/raids", "kind": "raid", "ok": True, "used": 6840, "total": 10900, "percent": 62.8,
+             "md": {"name": "md0", "level": "raid5", "devices": 4, "working": 3, "health": "degraded"}},
+            {"path": "/mnt/media", "kind": "disk", "ok": True, "used": 50, "total": 500, "percent": 10, "md": None},
+            {"path": "/gone", "kind": "disk", "ok": False, "error": "x", "used": 0, "total": 0, "percent": 0, "md": None}]}
+        cfg = dict(SCFG, storage_paths=["/raids", "/mnt/media", "/gone"], storage_labels=["Main RAID", "", "Backup"])
+        rows = self.server.build(data, "H", "h", (0, 0), cfg)["storage"]
+        self.assertEqual([r["name"] for r in rows], ["Main RAID:", "media:", "Backup:"])
+        self.assertEqual((rows[0]["cls"], rows[1]["status"], rows[2]["status"]), ("bad", "", "Not reachable"))
+        # only as many rows as paths were listed (the layout was sized for that)
+        one = self.server.build(data, "H", "h", (0, 0), dict(cfg, storage_paths=["/raids"], storage_labels=[]))["storage"]
+        self.assertEqual(len(one), 1)
+
+    def test_storage_can_be_switched_off(self):
+        data = {"ram_t": 8, "raid_t": 100, "raid_u": 1, "raid_p": 1}
+        out = self.server.build(data, "H", "h", (0, 0), dict(SCFG, show_storage=False, show_swap=False))
+        self.assertEqual(out["storage"], [])
+        self.assertFalse(out["show_swap"])
+        self.assertTrue(out["show_uptime"])
+
+    def test_params_sent_to_the_server(self):
+        self.assertEqual(self.server.server_params(SCFG), {})        # nothing configured -> server decides
+        p = self.server.server_params(dict(SCFG, storage_paths=["/a", "/b c"], system_path="/", net_interfaces=["eth0"]))
+        self.assertEqual(p, {"paths[]": ["/a", "/b c"], "system": "/", "nic[]": ["eth0"]})
+
+
+class ConfigFeatureTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["STATS_WIDGET_CONFIG"] = str(Path(self.tmp.name) / "config.toml")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_v03_raid_label_is_migrated(self):
+        common.config_path().write_text('[server]\nraid_label = "Tank"\n', encoding="utf-8")
+        self.assertEqual(common.load_config()["server"]["storage_labels"], ["Tank"])
+
+    def test_new_settings_roundtrip_both_parsers(self):
+        cfg = copy.deepcopy(common.DEFAULTS)
+        cfg["general"].update(week_start="mon", weekend=["sat", "sun"])
+        cfg["server"].update(storage_paths=["/raids", "/mnt/media"], storage_labels=["RAID", ""], show_swap=False,
+                             net_interfaces=["enp3s0"], system_path="/", system_label="Root")
+        common.save_config(cfg)
+        a = common.load_config()
+        saved = common.tomllib
+        common.tomllib = None
+        try:
+            b = common.load_config()
+        finally:
+            common.tomllib = saved
+        self.assertEqual(a, b)
+        self.assertEqual(a["server"]["storage_paths"], ["/raids", "/mnt/media"])
+        self.assertIs(a["server"]["show_swap"], False)
+        self.assertEqual(common.weekend_days(a), {5, 6})
+        self.assertEqual(common.week_start(a), 0)
+
+    def test_weekend_parsing_is_forgiving(self):
+        self.assertEqual(common.weekend_days({"general": {"weekend": ["Friday", "SAT", "nonsense"]}}), {4, 5})
+        self.assertEqual(common.weekend_days({"general": {"weekend": []}}), set())
+        self.assertEqual(common.weekend_days({"general": {"weekend": "fri, sat"}}), {4, 5})
+        self.assertEqual(common.week_start({"general": {"week_start": "bogus"}}), 6)
+
+    def test_design_height(self):
+        d = copy.deepcopy(common.DEFAULTS)
+        self.assertEqual(common.design_height(d), 475)                      # default layout is untouched
+        d["server"]["storage_paths"] = ["/a", "/b"]
+        self.assertGreater(common.design_height(d), 475)                    # an extra pool needs room
+        d["server"].update(show_swap=False, show_network=False, show_temp=False)
+        self.assertEqual(common.design_height(d), 475)                      # hiding rows gives it back
+
+    def test_clock_format(self):
+        self.assertEqual(common.clock_pair(2840, 4600), "2.84 / 4.60 GHz")
+        self.assertEqual(common.clock_pair(800), "800 MHz")
+        self.assertEqual(common.clock_pair(0), "N/A")
+        self.assertEqual(common.clock_pair(3000, 2900), "3.00 GHz")        # never "current / smaller max"
 
 
 class CalendarWeatherTests(unittest.TestCase):
@@ -248,51 +223,20 @@ class CalendarWeatherTests(unittest.TestCase):
         first = data["weeks"][0][0]                       # Nov 1 2026 is a Sunday
         self.assertEqual(first["d"], "1")
         self.assertEqual(data["weeks"][0][5]["c"], "wk")  # Friday = weekend
-        self.assertEqual([h["t"] for h in data["heads"]], ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"])
-        self.assertEqual([h["c"] for h in data["heads"]], ["", "", "", "", "", "wd-red", "wd-red"])
+        self.assertEqual([h["n"] for h in data["heads"]], ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"])
+        self.assertEqual([h["n"] for h in data["heads"] if h["c"]], ["FRI", "SAT"])
 
-    def test_weekend_and_week_start_are_configurable(self):
+    def test_calendar_other_weekend_and_week_start(self):
         import calendar_grid
-        cfg = {"general": {"weekend": ["Sat", "sun"], "week_start": "Monday"}}
-        data = calendar_grid.build(date(2026, 11, 15), common.weekend_days(cfg), common.week_start(cfg))
-        self.assertEqual([h["t"] for h in data["heads"]], ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"])
-        self.assertEqual([h["c"] for h in data["heads"]].count("wd-red"), 2)
-        self.assertEqual(data["heads"][5]["c"], "wd-red")
-        row = data["weeks"][0]                                  # Mon 26 Oct ... Sun 1 Nov
-        self.assertEqual(row[6]["d"], "1")
-        self.assertEqual(row[5]["c"], "out")                    # other-month days stay grey, not red
-        second = data["weeks"][1]                               # Mon 2 Nov ... Sun 8 Nov
-        self.assertEqual([c["c"] for c in second], ["", "", "", "", "", "wk", "wk"])
-
-    def test_weekend_setting_edge_cases(self):
-        wk = lambda v: common.weekend_days({"general": {"weekend": v}})       # noqa: E731
-        self.assertEqual(wk(["fri", "sat"]), {4, 5})
-        self.assertEqual(wk(["Friday", " SAT "]), {4, 5})
-        self.assertEqual(wk(["sun"]), {6})
-        self.assertEqual(wk([]), set())                                       # no weekend at all
-        self.assertEqual(wk(["nonsense"]), {4, 5})                            # unusable -> default
-        self.assertEqual(wk("fri"), {4, 5})
-        self.assertEqual(common.weekend_days({}), {4, 5})
-        self.assertEqual(common.week_start({"general": {"week_start": "xyz"}}), 6)
-        self.assertEqual(common.week_start({"general": {"week_start": "saturday"}}), 5)
-
-    def test_weekend_survives_the_config_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            os.environ["STATS_WIDGET_CONFIG"] = str(Path(tmp) / "config.toml")
-            cfg = copy.deepcopy(common.DEFAULTS)
-            cfg["general"].update(weekend=["sat", "sun"], week_start="monday")
-            cfg["server"].update(storage_paths=["/a", "/b"], storage_labels=["A", "B"], show_swap=False,
-                                 net_interfaces=["eth0"], name="Lab")
-            common.save_config(cfg)
-            for parser_off in (False, True):
-                if parser_off:
-                    common.tomllib = None
-                back = common.load_config()
-                self.assertEqual(back["general"]["weekend"], ["sat", "sun"])
-                self.assertEqual(back["server"]["storage_paths"], ["/a", "/b"])
-                self.assertFalse(back["server"]["show_swap"])
-                self.assertEqual(back["server"]["name"], "Lab")
-            common.tomllib = __import__("tomllib")
+        data = calendar_grid.build(date(2026, 11, 15), 0, {5, 6})          # Monday first, Sat + Sun weekend
+        self.assertEqual([h["n"] for h in data["heads"]], ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"])
+        self.assertEqual([h["n"] for h in data["heads"] if h["c"]], ["SAT", "SUN"])
+        days = {c["d"]: c["c"] for w in data["weeks"] for c in w if "out" not in c["c"]}
+        self.assertEqual(days["1"], "wk")                                  # Sun 1 Nov
+        self.assertEqual(days["6"], "")                                    # Fri 6 Nov is a working day now
+        self.assertEqual(days["7"], "wk")
+        none = calendar_grid.build(date(2026, 11, 15), 6, set())
+        self.assertFalse(any("wk" in c["c"] for w in none["weeks"] for c in w))
 
     def test_every_weather_glyph_is_in_the_bundled_font(self):
         try:
@@ -327,57 +271,6 @@ class CalendarWeatherTests(unittest.TestCase):
         self.assertEqual(weather.wind_arrow(359), "south")
 
 
-class PcStatsTests(unittest.TestCase):
-    def fake_sys(self, tmp, khz_list):
-        for i, khz in enumerate(khz_list):
-            d = Path(tmp) / "devices" / "system" / "cpu" / f"cpu{i}" / "cpufreq"
-            d.mkdir(parents=True)
-            (d / "scaling_cur_freq").write_text(f"{khz}\n")
-
-    def test_cpu_clock_is_the_average_of_all_cores(self):
-        import pcstats
-        with tempfile.TemporaryDirectory() as tmp:
-            self.fake_sys(tmp, [800000, 3200000, 2000000, 2000000])
-            self.assertEqual(pcstats.cpu_clock_mhz(tmp, tmp), 2000.0)
-
-    def test_cpu_clock_falls_back_to_cpuinfo(self):
-        import pcstats
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "cpuinfo").write_text("processor : 0\ncpu MHz\t\t: 1000.000\nprocessor : 1\ncpu MHz\t\t: 3000.000\n")
-            self.assertEqual(pcstats.cpu_clock_mhz(tmp, tmp), 2000.0)
-            self.assertIsNone(pcstats.cpu_clock_mhz("/nonexistent", "/nonexistent"))
-
-    def test_clock_text(self):
-        self.assertEqual(common.clock_text(2000), "2.00 GHz")
-        self.assertEqual(common.clock_text(798.6), "799 MHz")
-        self.assertEqual(common.clock_text(None), "N/A")
-
-    def amd_card(self, tmp, total, maker=None):
-        Path(tmp, "mem_info_vram_total").write_text(str(total))
-        Path(tmp, "mem_info_vram_used").write_text(str(total // 4))
-        if maker:
-            Path(tmp, "mem_info_vram_vendor").write_text(maker)
-        out = {"use": "N/A", "temp": "N/A", "vram": None, "clock": "N/A"}
-        import pcstats
-        pcstats.GPU._amd(tmp, out)
-        return out
-
-    def test_vram_only_for_cards_with_their_own_memory(self):
-        gib = 1024 ** 3
-        with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2, tempfile.TemporaryDirectory() as t3:
-            self.assertEqual(self.amd_card(t1, 8 * gib, "samsung")["vram"], "2.00 GB / 8 GB")   # discrete card
-            self.assertIsNone(self.amd_card(t2, 512 * 1024 ** 2, "unknown")["vram"])             # APU: shares system RAM
-            self.assertIsNotNone(self.amd_card(t3, 4 * gib)["vram"])                             # no vendor file, 4 GB: card
-
-    def test_intel_igpu_has_no_vram(self):
-        import pcstats
-        gpu = pcstats.GPU.__new__(pcstats.GPU)
-        gpu.card, gpu.vendor, gpu.last_rc6 = "/nonexistent", "0x8086", None
-        self.assertIsNone(gpu.stats()["vram"])
-        gpu.vendor = "0x10de"                                    # NVIDIA: always has memory (shows N/A if unreadable)
-        self.assertIsNotNone(gpu.stats()["vram"])
-
-
 class SizeTests(unittest.TestCase):
     def setUp(self):
         import apply_config
@@ -388,12 +281,6 @@ class SizeTests(unittest.TestCase):
         out = self.ac.render_layout(self.tpl, 795, 475)
         for expected in (":width 249", ":width 265", ":width 261", ":height 108", ":width 37 :height 22"):
             self.assertIn(expected, out)
-
-    def test_layout_is_data_driven(self):
-        self.assertNotIn("Load average", self.tpl)
-        self.assertNotIn('"FRI"', self.tpl)
-        for needle in ("{server.sections}", "{cal.heads}", "{pc.cpu_clock}", "{pc.has_vram}"):
-            self.assertIn(needle, self.tpl)
 
     def test_no_placeholder_left_and_parentheses_balance(self):
         for w, h in ((795, 475), (400, 238), (2385, 1425), (1000, 475)):
@@ -419,6 +306,23 @@ class SizeTests(unittest.TestCase):
             border = common.rnd(self.ac.BORDER * min(w / 795, h / 475))
             self.assertEqual(sum(cols) + 2 * border, w)
 
+    def test_extra_storage_rows_shrink_the_layout_instead_of_overflowing(self):
+        cfg = copy.deepcopy(common.DEFAULTS)
+        cfg["server"]["storage_paths"] = ["/a", "/b"]
+        design_h = common.design_height(cfg)
+        self.assertGreater(design_h, 475)
+        sx, sy, sf = self.ac.factors(795, 475, design_h)
+        self.assertEqual(sx, 1.0)
+        self.assertLess(sy, 1.0)
+        self.assertEqual(sf, sy)                                   # text follows, so nothing is cut off
+        self.assertEqual(self.ac.factors(795, 475), (1.0, 1.0, 1.0))
+        self.assertNotIn("{{", self.ac.render_layout(self.tpl, 795, 475, design_h))
+
+    def test_layout_has_no_load_average_and_has_dynamic_calendar_header(self):
+        self.assertNotIn("Load average", self.tpl)
+        self.assertIn("server.clock", self.tpl)
+        self.assertIn("{cal.heads}", self.tpl)
+
     def test_scaling_doubles_sizes(self):
         out = self.ac.render_layout(self.tpl, 1590, 950)
         self.assertIn(":width 110 :height 110", out)             # the seconds box, 55 x 55 by default
@@ -441,6 +345,125 @@ class SizeTests(unittest.TestCase):
             self.assertIn("$sx: 1.257862;", (common.ROOT / "theme.scss").read_text())
             common.save_config(common.DEFAULTS)                   # restore generated files
             self.ac.apply()
+
+
+class PcToggleTests(unittest.TestCase):
+    """The PC Stats column: one switch per row, saved in [pc], applied by pcstats.py and the layout."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["STATS_WIDGET_CONFIG"] = str(Path(self.tmp.name) / "config.toml")
+        self.saved_toml = common.tomllib
+
+    def tearDown(self):
+        common.tomllib = self.saved_toml
+        self.tmp.cleanup()
+
+    def test_every_row_has_a_switch_and_defaults_to_on(self):
+        import pcstats
+        flags = pcstats.pc_flags(common.load_config()["pc"])
+        self.assertEqual(set(flags), {f"show_{k}" for k in common.PC_SHOW_KEYS})
+        self.assertTrue(all(flags.values()))
+
+    def test_switches_survive_save_and_both_parsers(self):
+        cfg = copy.deepcopy(common.DEFAULTS)
+        cfg["pc"].update(show_gpu_temp=False, show_uptime=False, show_battery=False)
+        common.save_config(cfg)
+        for parser in (common.tomllib, None):                 # tomllib and the built-in fallback
+            common.tomllib = parser
+            pc = common.load_config()["pc"]
+            self.assertFalse(pc["show_gpu_temp"] or pc["show_uptime"] or pc["show_battery"])
+            self.assertTrue(pc["show_cpu"] and pc["show_network"])
+
+    def test_missing_section_means_everything_shown(self):
+        Path(os.environ["STATS_WIDGET_CONFIG"]).write_text("[general]\nuse_24h = true\n")
+        self.assertTrue(all(common.load_config()["pc"].values()))
+
+    def test_layout_knows_every_pc_switch(self):
+        template = (common.ROOT / "eww.yuck.in").read_text()
+        for key in common.PC_SHOW_KEYS:
+            self.assertIn(f"pc.show_{key}", template, key)
+            self.assertIn(f'"show_{key}":true', template.split("(deflisten pc")[1].split("scripts/pcstats.py")[0], key)
+
+    def test_vram_and_battery_switches_only_matter_when_the_hardware_exists(self):
+        template = (common.ROOT / "eww.yuck.in").read_text()
+        self.assertIn("pc.show_vram && pc.has_vram", template)
+        self.assertIn("pc.show_battery && pc.has_battery", template)
+
+
+class ServerToggleTests(unittest.TestCase):
+    def setUp(self):
+        import server
+        self.server = server
+        self.scfg = copy.deepcopy(common.DEFAULTS["server"])
+        self.data = {"host": "rayaz", "cpu": 10, "ram_u": 4, "ram_t": 16, "ram_p": 25, "ssd_u": 1, "ssd_t": 2,
+                     "ssd_p": 50, "net_rx": 1, "net_tx": 1}
+
+    def test_custom_server_name_replaces_the_hostname(self):
+        self.assertIn("rayaz", self.server.build(self.data, "Home", "h", (1.0, 1.0), self.scfg)["title"])
+        self.scfg["name"] = " Homelab "
+        self.assertEqual(self.server.build(self.data, "Home", "h", (1.0, 1.0), self.scfg)["title"], "Homelab · Home")
+
+    def test_cpu_and_ram_can_be_hidden(self):
+        self.scfg.update(show_cpu=False, show_ram=False)
+        out = self.server.build(self.data, "Home", "h", (1.0, 1.0), self.scfg)
+        self.assertFalse(out["show_cpu"] or out["show_ram"])
+        self.assertTrue(out["show_temp"])
+
+    def test_hidden_rows_give_the_height_back(self):
+        full = common.design_height(common.DEFAULTS)
+        cfg = copy.deepcopy(common.DEFAULTS)
+        cfg["server"].update(show_cpu=False, show_ram=False, show_temp=False, show_swap=False)
+        self.assertLessEqual(common.design_height(cfg), full)
+
+    def test_draft_key_names_are_migrated(self):
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["STATS_WIDGET_CONFIG"] = str(Path(tmp.name) / "config.toml")
+        Path(os.environ["STATS_WIDGET_CONFIG"]).write_text(
+            "[server]\nshow_clock = false\nshow_temperature = false\nshow_system_disk = false\n")
+        s = common.load_config()["server"]
+        self.assertFalse(s["show_cpu_clock"] or s["show_temp"] or s["show_system"])
+        tmp.cleanup()
+
+    def test_label_follows_the_position_when_the_server_picked_other_paths(self):
+        self.scfg.update(storage_paths=["/mnt/media"], storage_labels=["Media"], show_storage=True)
+        data = dict(self.data, storage=[{"path": "/raids", "kind": "raid", "ok": True, "used": 1, "total": 2,
+                                         "percent": 50, "md": None}])
+        rows = self.server.build(data, "Home", "h", (1.0, 1.0), self.scfg)["storage"]
+        self.assertEqual(rows[0]["name"], "Media:")
+
+
+class WeekendFallbackTests(unittest.TestCase):
+    def test_unreadable_weekend_keeps_friday_saturday_but_empty_means_none(self):
+        self.assertEqual(common.weekend_days({"general": {"weekend": ["xyz"]}}), {4, 5})
+        self.assertEqual(common.weekend_days({"general": {"weekend": []}}), set())
+        self.assertEqual(common.weekend_days({"general": {"weekend": ["Sun", "monday"]}}), {6, 0})
+
+
+class GpuDetectionTests(unittest.TestCase):
+    def test_apu_without_own_memory_has_no_vram_row_but_a_discrete_card_does(self):
+        import pcstats
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "mem_info_vram_total").write_text(str(512 * 1024 ** 2))
+            self.assertFalse(pcstats.GPU.amd_has_dedicated_vram(d))               # APU: 512 MB carve-out of the RAM
+            (Path(d) / "mem_info_vram_total").write_text(str(8 * 1024 ** 3))
+            self.assertTrue(pcstats.GPU.amd_has_dedicated_vram(d))                # real card
+            (Path(d) / "mem_info_vram_vendor").write_text("samsung")
+            (Path(d) / "mem_info_vram_total").write_text(str(512 * 1024 ** 2))
+            self.assertTrue(pcstats.GPU.amd_has_dedicated_vram(d))                # memory maker named: dedicated
+
+    def test_cpu_clock_reads_cpufreq_then_cpuinfo(self):
+        import pcstats
+        with tempfile.TemporaryDirectory() as d:
+            cpu = Path(d) / "sys" / "devices" / "system" / "cpu" / "cpu0" / "cpufreq"
+            cpu.mkdir(parents=True)
+            (cpu / "scaling_cur_freq").write_text("2400000")
+            (cpu / "cpuinfo_max_freq").write_text("4600000")
+            self.assertEqual(pcstats.cpu_clock(str(Path(d) / "sys"), str(Path(d) / "nope")), (2400.0, 4600.0))
+            proc = Path(d) / "proc"
+            proc.mkdir()
+            (proc / "cpuinfo").write_text("cpu MHz\t\t: 1000.0\ncpu MHz\t\t: 3000.0\n")
+            self.assertEqual(pcstats.cpu_clock(str(Path(d) / "none"), str(proc)), (2000.0, 0.0))
 
 
 if __name__ == "__main__":

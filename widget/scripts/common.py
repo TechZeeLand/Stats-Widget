@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent            # the widget folder (ha
 CACHE = Path.home() / ".cache" / "stats-widget"
 
 DEFAULTS = {
-    "general": {"use_24h": False, "weekend": ["fri", "sat"], "week_start": "sunday"},
+    "general": {"use_24h": False, "week_start": "sun", "weekend": ["fri", "sat"]},
     "server": {
         "urls": ["http://192.168.0.123/stats.php", "http://rayaz.netbird.cloud/stats.php"],
         "labels": ["Home network", "Remote (NetBird)"],
@@ -23,23 +23,26 @@ DEFAULTS = {
         "interval": 1.0,
         "timeout": 1.5,
         "retry_primary": 20,
-        "name": "",                  # shown instead of the server's own hostname
+        "name": "",                  # shown instead of the server's own hostname ("" = hostname)
+        # What the server column shows. Empty path lists mean "whatever the server itself is set up for".
+        "system_label": "System",
+        "system_path": "",
+        "storage_paths": [],
+        "storage_labels": [],
+        "net_interfaces": [],
         "show_uptime": True,
+        "show_cpu_clock": True,
         "show_cpu": True,
-        "show_clock": True,
-        "show_temperature": True,
+        "show_temp": True,
         "show_ram": True,
         "show_swap": True,
+        "show_system": True,
+        "show_storage": True,
         "show_network": True,
-        "show_system_disk": True,
-        "system_label": "System",
-        "system_path": "",           # "" = whatever the server treats as its system disk
-        "storage_paths": [],         # [] = automatic: every disk / pool that is not the system disk
-        "storage_labels": [],
-        "max_storage_rows": 3,       # automatic mode only
-        "raid_label": "RAID",        # automatic mode: name of mdadm / ZFS / btrfs / mergerfs rows
-        "net_interfaces": [],        # [] = all physical network cards on the server
     },
+    # What the PC Stats column shows: one switch per row (a block whose rows are all off disappears).
+    "pc": {f"show_{k}": True for k in ("cpu", "cpu_clock", "cpu_temp", "uptime", "gpu_use", "gpu_temp", "vram",
+                                       "ram", "disk", "battery", "network")},
     "weather": {
         "display_name": "Dhaka, Bangladesh",
         "latitude": 23.7643863,
@@ -58,6 +61,13 @@ MIN_SCALE, MAX_SCALE = 0.5, 3.0
 ANCHORS = ["top left", "top center", "top right", "center left", "center", "center right",
            "bottom left", "bottom center", "bottom right"]
 LAYERS = ["bottom", "bg", "fg", "overlay"]
+
+# Python's weekday() order: Monday = 0 ... Sunday = 6
+WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+SHOW_KEYS = ("uptime", "cpu_clock", "cpu", "temp", "ram", "swap", "system", "storage", "network")   # Server column
+PC_SHOW_KEYS = ("cpu", "cpu_clock", "cpu_temp", "uptime", "gpu_use", "gpu_temp", "vram",
+                "ram", "disk", "battery", "network")                                               # PC column
+MAX_STORAGE = 4                                          # storage pools the server column can show
 
 
 def rnd(x):
@@ -78,46 +88,72 @@ def widget_size(cfg):
     return tuple(out)
 
 
-# ───────────────────────── calendar week ─────────────────────────
-DAY_CODES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]        # index 0 = Monday (like datetime.weekday())
-DEFAULT_WEEKEND = [4, 5]                                              # Friday + Saturday
-DEFAULT_WEEK_START = 6                                                # Sunday
-
-
-def _day_index(value):
-    """'Fri' / 'friday' / ' FRI ' -> 4.  Anything else -> None."""
-    text = str(value).strip().lower()[:3]
-    return DAY_CODES.index(text) if text in DAY_CODES else None
+def _day_index(token):
+    """'Fri', 'friday', 'FRI' -> 4.   Anything else -> None."""
+    t = str(token).strip().lower()[:3]
+    return WEEKDAYS.index(t) if t in WEEKDAYS else None
 
 
 def weekend_days(cfg):
-    """Set of weekday numbers (Monday = 0) that are the weekend.
-    [] = no highlighted weekend. A list with no valid day names at all falls back to Friday + Saturday."""
-    raw = cfg.get("general", {}).get("weekend", DEFAULT_WEEKEND_NAMES)
+    """Set of weekday numbers (Mon = 0) drawn red in the calendar. Unknown names are ignored; [] = no weekend."""
+    raw = cfg.get("general", {}).get("weekend", DEFAULTS["general"]["weekend"])
+    if isinstance(raw, str):
+        raw = [x for x in raw.replace(";", ",").split(",")]
     if not isinstance(raw, (list, tuple)):
-        return set(DEFAULT_WEEKEND)
-    days = {i for i in (_day_index(v) for v in raw) if i is not None}
-    return days if days or not raw else set(DEFAULT_WEEKEND)
+        raw = DEFAULTS["general"]["weekend"]
+    days = {i for i in map(_day_index, raw) if i is not None}
+    if raw and not days:                                       # only unreadable names: do not silently drop the weekend
+        days = {i for i in map(_day_index, DEFAULTS["general"]["weekend"]) if i is not None}
+    return days
 
 
 def week_start(cfg):
-    """First column of the calendar as a weekday number (Monday = 0). Bad value -> Sunday."""
-    i = _day_index(cfg.get("general", {}).get("week_start", "sunday"))
-    return DEFAULT_WEEK_START if i is None else i
+    """First column of the calendar as a weekday number (Mon = 0). Default Sunday."""
+    i = _day_index(cfg.get("general", {}).get("week_start", "sun"))
+    return 6 if i is None else i
 
 
-DEFAULT_WEEKEND_NAMES = [DAY_CODES[i] for i in DEFAULT_WEEKEND]
+def clean_list(value):
+    """['a', ' b '] or 'a, b' -> ['a', 'b'] (blank entries are kept: they keep two parallel lists aligned)."""
+    if isinstance(value, str):
+        value = value.split(",")
+    return [str(x).strip() for x in value] if isinstance(value, (list, tuple)) else []
 
 
-def clock_text(mhz):
-    """2412.7 -> '2.41 GHz', 800 -> '800 MHz', anything unusable -> 'N/A'."""
-    try:
-        mhz = float(mhz)
-    except (TypeError, ValueError):
-        return "N/A"
-    if mhz <= 0:
-        return "N/A"
-    return f"{mhz / 1000:.2f} GHz" if mhz >= 1000 else f"{mhz:.0f} MHz"
+def storage_pairs(cfg):
+    """[(label, path)] of the storage pools the user listed (labels padded with ''), at most MAX_STORAGE."""
+    s = cfg.get("server", {})
+    paths, labels = clean_list(s.get("storage_paths")), clean_list(s.get("storage_labels"))
+    pairs = [(labels[i] if i < len(labels) else "", p) for i, p in enumerate(paths) if p]
+    return pairs[:MAX_STORAGE]
+
+
+def storage_slots(cfg):
+    """How many storage rows the layout has room for: one per listed path, at least one."""
+    return max(1, len(storage_pairs(cfg)))
+
+
+def design_height(cfg):
+    """Height (design px) the layout needs. 475 normally; taller when the server column gets extra
+    storage rows, so that apply_config can shrink everything a little instead of overflowing the window.
+    Numbers measured from the default layout: content 430 px of 455 px usable."""
+    s = cfg.get("server", {})
+    on = lambda k: bool(s.get("show_" + k, True))                 # noqa: E731
+    delta = 0
+    delta -= 22 * sum(1 for k in ("uptime", "cpu_clock", "temp", "swap") if not on(k))
+    delta -= 25 * sum(1 for k in ("cpu", "ram") if not on(k))
+    if not any(on(k) for k in ("cpu", "temp", "ram", "swap")):
+        delta -= 30                                               # the whole "CPU & Memory" heading goes
+    pools = storage_slots(cfg) if on("storage") else 0
+    delta += (pools - 1) * 47                                     # one bar (25) + one status line (22) each
+    if not on("system"):
+        delta -= 25
+    if not on("system") and not on("storage"):
+        delta -= 30                                               # the whole "Storage" heading goes
+    if not on("network"):
+        delta -= 74
+    need = 430 + delta + 2 * 10 + 5                               # content + frame + a little air
+    return max(DEFAULT_H, need)
 
 
 # ───────────────────────── config file ─────────────────────────
@@ -169,6 +205,13 @@ def load_config():
         for section, values in user.items():
             if isinstance(values, dict):
                 cfg.setdefault(section, {}).update(values)
+        srv = user.get("server") if isinstance(user.get("server"), dict) else {}
+        if "raid_label" in srv and "storage_labels" not in srv:      # settings written by v0.3
+            cfg["server"]["storage_labels"] = [str(srv["raid_label"])]
+        for old, new in (("show_clock", "show_cpu_clock"), ("show_temperature", "show_temp"),
+                         ("show_system_disk", "show_system")):         # names used by an earlier draft of the Server rows
+            if old in srv and new not in srv:
+                cfg["server"][new] = srv[old]
     except FileNotFoundError:
         pass
     except Exception as exc:                          # syntax error etc.
@@ -188,18 +231,18 @@ def _val(v):
 
 def render_config(cfg):
     g, s, w, p, a = (cfg[k] for k in ("general", "server", "weather", "position", "appearance"))
-    D = DEFAULTS["server"]
-    sv = lambda key: s.get(key, D[key])                                       # noqa: E731
-    gv = lambda key: g.get(key, DEFAULTS["general"][key])                     # noqa: E731
+    weekend = sorted(weekend_days(cfg))
+    show = lambda k: _val(bool(s.get("show_" + k, True)))             # noqa: E731
+    pc_show = lambda k: _val(bool(cfg.get("pc", {}).get("show_" + k, True)))   # noqa: E731
     return f"""\
 # Stats Widget settings - https://github.com/TechZeeLand/Stats-Widget
 # Easiest way to change these:   stats-widget config      (graphical settings window)
 # After editing by hand run:     stats-widget restart
 
 [general]
-use_24h = {_val(g['use_24h'])}                  # false = 3:07   true = 15:07
-weekend = {_val(gv('weekend'))}      # days drawn in red: any of "mon" "tue" "wed" "thu" "fri" "sat" "sun"  ([] = none)
-week_start = {_val(gv('week_start'))}            # first column of the calendar: "sunday", "monday", "saturday" ...
+use_24h    = {_val(g['use_24h'])}                  # false = 3:07   true = 15:07
+week_start = {_val(WEEKDAYS[week_start(cfg)])}                  # first day of the calendar week: mon tue wed thu fri sat sun
+weekend    = {_val([WEEKDAYS[i] for i in weekend])}   # days drawn in red (any of the seven; [] = none)
 
 [server]
 # stats.php addresses, tried in this order. The first that answers is used; while a later one is
@@ -212,25 +255,36 @@ interval      = {_val(float(s['interval']))}     # seconds between requests
 timeout       = {_val(float(s['timeout']))}      # seconds before an address is considered down
 retry_primary = {_val(int(s['retry_primary']))}  # seconds between "is home reachable again?" checks
 
-# What the Server column shows. Everything here is decided by the widget - nothing to edit on the server.
-name = {_val(sv('name'))}                         # shown instead of the server's own hostname ("" = hostname)
-show_uptime      = {_val(sv('show_uptime'))}
-show_cpu         = {_val(sv('show_cpu'))}
-show_clock       = {_val(sv('show_clock'))}                     # current CPU clock speed
-show_temperature = {_val(sv('show_temperature'))}
-show_ram         = {_val(sv('show_ram'))}
-show_swap        = {_val(sv('show_swap'))}
-show_network     = {_val(sv('show_network'))}
-show_system_disk = {_val(sv('show_system_disk'))}
-system_label     = {_val(sv('system_label'))}               # name of the system-disk row
-system_path      = {_val(sv('system_path'))}                      # "" = the server's own choice, or a mount point such as "/"
-# Extra storage rows. [] = automatic: every separate disk / RAID / pool the server reports (none if it has only
-# its system disk). Or list mount points as the SERVER sees them, with a name for each (same order):
-storage_paths  = {_val(sv('storage_paths'))}
-storage_labels = {_val(sv('storage_labels'))}
-max_storage_rows = {_val(int(sv('max_storage_rows')))}                  # automatic mode: how many extra disks to show at most
-raid_label       = {_val(sv('raid_label'))}                  # automatic mode: name for mdadm / ZFS / btrfs / mergerfs rows
-net_interfaces   = {_val(sv('net_interfaces'))}                       # [] = all physical network cards, or e.g. ["enp3s0"]
+# What the server column shows. The paths are sent to stats.php with every request, so you can change
+# them here without touching the server (unless its admin set allow_client_config = false).
+name           = {_val(str(s.get('name', '')))}                         # shown instead of the server's hostname ("" = hostname)
+system_label   = {_val(s['system_label'])}                # name of the system-disk row
+system_path    = {_val(s['system_path'])}                      # "" = the server's own setting (normally "/")
+storage_paths  = {_val(clean_list(s['storage_paths']))}                   # e.g. ["/raids", "/mnt/media"]; [] = what the server is set up for / finds itself
+storage_labels = {_val(clean_list(s['storage_labels']))}                   # names for those paths, same order ("" = automatic)
+net_interfaces = {_val(clean_list(s['net_interfaces']))}                   # e.g. ["enp3s0"]; [] = all physical network cards
+show_uptime    = {show('uptime')}
+show_cpu_clock = {show('cpu_clock')}
+show_cpu       = {show('cpu')}
+show_temp      = {show('temp')}
+show_ram       = {show('ram')}
+show_swap      = {show('swap')}
+show_system    = {show('system')}
+show_storage   = {show('storage')}
+show_network   = {show('network')}
+
+[pc]                                              # which rows the PC Stats column shows (true / false)
+show_cpu       = {pc_show('cpu')}                 # CPU usage bar
+show_cpu_clock = {pc_show('cpu_clock')}
+show_cpu_temp  = {pc_show('cpu_temp')}
+show_uptime    = {pc_show('uptime')}
+show_gpu_use   = {pc_show('gpu_use')}                 # GPU utilisation + clock
+show_gpu_temp  = {pc_show('gpu_temp')}
+show_vram      = {pc_show('vram')}                 # only exists on cards with their own memory
+show_ram       = {pc_show('ram')}
+show_disk      = {pc_show('disk')}
+show_battery   = {pc_show('battery')}              # only exists on laptops
+show_network   = {pc_show('network')}
 
 [weather]                                         # Open-Meteo, no API key needed
 display_name    = {_val(w['display_name'])}
@@ -289,6 +343,18 @@ def size_pair(used, total):
         tb = lambda v: fmt(v / 1024, 2 if v < 1024 else 1)      # noqa: E731
         return f"{tb(used)} / {tb(total)} TB"
     return f"{fmt(used, 0 if total >= 100 else 1)} / {fmt(total, 0 if total >= 100 else 1)} GB"
+
+
+def clock_pair(cur_mhz, max_mhz=0):
+    """Current (and maximum) CPU clock -> '2.84 / 4.60 GHz', '2.84 GHz', '800 MHz' or 'N/A'."""
+    cur, top = num(cur_mhz), num(max_mhz)
+    if cur <= 0:
+        return "N/A"
+    if top >= cur:
+        if top >= 1000:
+            return f"{cur / 1000:.2f} / {top / 1000:.2f} GHz"
+        return f"{cur:.0f} / {top:.0f} MHz"
+    return f"{cur / 1000:.2f} GHz" if cur >= 1000 else f"{cur:.0f} MHz"
 
 
 def duration(seconds):

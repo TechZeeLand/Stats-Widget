@@ -4,14 +4,21 @@
 
 Address failover: the first URL (home network) is preferred. If it does not answer, the next one
 (e.g. NetBird / VPN) is used, and the first is re-tested every few seconds so the widget switches
-back by itself when you get home."""
+back by itself when you get home.
+
+What the column shows (system disk, storage pools, network cards, which rows) comes from config.toml.
+The paths are sent to stats.php with every request, so they can be changed without touching the server."""
 import json
+import os
 import re
 import time
 import urllib.parse
 import urllib.request
 
-from common import clock_text, duration, emit, fmt, load_config, num, size_pair
+from common import (SHOW_KEYS, clean_list, clock_pair, duration, emit, fmt, load_config, num, size_pair,
+                    storage_pairs, storage_slots)
+
+KIND_LABEL = {"raid": "RAID", "zfs": "ZFS", "btrfs": "Btrfs", "mergerfs": "Pool"}
 
 
 def flatten(obj, out=None):
@@ -24,12 +31,28 @@ def flatten(obj, out=None):
     return out
 
 
+def server_params(scfg):
+    """Query parameters that tell stats.php what to report. Only what the user filled in is sent; an old
+    stats.php (or one with allow_client_config = false) simply ignores them."""
+    params = {}
+    pairs = storage_pairs({"server": scfg})
+    if pairs:
+        params["paths[]"] = [p for _label, p in pairs]
+    system = str(scfg.get("system_path") or "").strip()
+    if system:
+        params["system"] = system
+    nics = [str(n).strip() for n in (scfg.get("net_interfaces") or []) if str(n).strip()]
+    if nics:
+        params["nic[]"] = nics
+    return params
+
+
 def fetch(url, token, timeout, params=None):
-    query = {k: v for k, v in (params or {}).items() if v}
+    query = dict(params or {})
     if token:
         query["key"] = token
     if query:
-        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(query)
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(query, doseq=True)
     req = urllib.request.Request(url, headers={"User-Agent": "stats-widget"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         text = resp.read().decode("utf-8", "replace")
@@ -45,8 +68,24 @@ def fetch(url, token, timeout, params=None):
         return dict(re.findall(r'"(\w+)"\s*:\s*"?(-?[\d.]+)"?', text))
 
 
+# ───────────────────────── storage / RAID health ─────────────────────────
+def array_status(a):
+    """One mdadm array (as reported by stats.php) -> (text, css-class)."""
+    health = a.get("health")
+    disks = f"{a.get('working')}/{a.get('devices')} disks" if a.get("devices") is not None else ""
+    if health == "degraded":
+        if a.get("progress") is not None:
+            return f"{a['name']} rebuilding {fmt(a['progress'])}%", "bad"
+        return f"{a['name']} degraded · {disks}".strip(" ·"), "bad"
+    if health in ("syncing", "checking"):
+        return f"{a['name']} {health} {fmt(a.get('progress') or 0)}%", "warn"
+    if health == "inactive":
+        return f"{a['name']} inactive", "bad"
+    return " · ".join(x for x in (a.get("level"), disks, "healthy") if x), "ok"
+
+
 def raid_status(raid, ok):
-    """-> (text, css-class) for the RAID health line."""
+    """All arrays of a (legacy) raid object -> (text, css-class); the worst array wins."""
     if isinstance(raid, dict) and raid.get("present") is False and not raid.get("arrays"):
         return "No RAID", "ok"                      # server says: nothing separate from the system disk
     if not isinstance(raid, dict) or not ok:
@@ -57,163 +96,144 @@ def raid_status(raid, ok):
         return "Online", "ok"
     worst, text = "ok", ""
     for a in arrays:
-        health = a.get("health")
-        disks = f"{a.get('working')}/{a.get('devices')} disks" if a.get("devices") is not None else ""
-        if health == "degraded":
-            msg = f"{a['name']} degraded · {disks}"
-            if a.get("progress") is not None:
-                msg = f"{a['name']} rebuilding {fmt(a['progress'])}%"
-            worst, text = "bad", msg
-            break
-        if health in ("syncing", "checking") and worst != "bad":
-            worst, text = "warn", f"{a['name']} {health} {fmt(a.get('progress') or 0)}%"
+        msg, cls = array_status(a)
+        if cls == "bad":
+            return msg, "bad"
+        if cls == "warn" and worst != "warn":
+            worst, text = "warn", msg
         elif worst == "ok" and not text:
-            text = f"{a['level']} · {disks} · healthy".replace("  ", " ")
+            text = msg
     return text or "Healthy", worst
 
 
-NA = "N/A"
+def pools_from(data):
+    """The storage pools of a stats.php answer. Servers older than v3 only know one 'raid' pool."""
+    if not isinstance(data, dict):
+        return []
+    pools = data.get("storage")
+    if isinstance(pools, list):
+        return [p for p in pools if isinstance(p, dict)]
+    f = flatten(data)
+    raid = data.get("raid")
+    if isinstance(raid, dict) and raid.get("present") is False and not raid.get("arrays"):
+        return []                                   # nothing separate from the system disk: no row
+    ok = bool(raid.get("ok")) if isinstance(raid, dict) else num(f.get("raid_t")) > 0
+    return [{"path": raid.get("path") if isinstance(raid, dict) else None, "kind": "raid", "ok": ok,
+             "error": raid.get("error") if isinstance(raid, dict) else None,
+             "used": num(f.get("raid_u")), "total": num(f.get("raid_t")), "percent": num(f.get("raid_p")),
+             "md": None}]
 
 
-def request_params(cfg):
-    """Settings the widget asks the server to apply (stats.php only accepts known mount points / NIC names)."""
-    nics = [str(n).strip() for n in cfg.get("net_interfaces", []) if str(n).strip()]
-    return {"system": str(cfg.get("system_path", "")).strip(), "net": ",".join(nics)}
+def _norm(path):
+    return str(path or "").rstrip("/") or "/"
 
 
-def row(name, val, pct=-1, cls=""):
-    """One line of the Server column. pct >= 0 draws a usage bar under it; cls colours the value (ok / warn / bad)."""
-    return {"n": name, "v": val, "p": pct, "c": cls}
+def pool_label(pool, custom):
+    if custom and custom.strip():
+        return custom.strip()
+    if pool.get("kind") in KIND_LABEL:
+        return KIND_LABEL[pool["kind"]]
+    base = os.path.basename(str(pool.get("path") or "").rstrip("/"))
+    return base or "Storage"
 
 
-def disk_for(path, disks):
-    """The reported disk whose mount point is `path`, or else the one that contains it (longest match).
-    "/" only matches exactly: a mistyped path must say "Not found" instead of silently showing the system disk."""
-    want, best = path.rstrip("/") or "/", None
-    for d in disks:
-        mount = str(d.get("mount", "")).rstrip("/") or "/"
-        if mount == want:
-            return d
-        if mount != "/" and (want + "/").startswith(mount + "/") and (best is None or len(mount) > len(best[0])):
-            best = (mount, d)
-    return best[1] if best else None
+def pool_status(pool, index, arrays):
+    """-> (text, css-class). Empty text = no status line (a plain disk has no health to report)."""
+    if not pool.get("ok"):
+        return ("Not reachable" if pool.get("error") else "No data"), "bad"
+    md = pool.get("md")
+    if isinstance(md, dict):
+        return array_status(md)
+    if index == 0 and arrays and pool.get("kind") in ("raid", None):
+        # mount table does not name the array (Docker, LVM, ...): fall back to all arrays like v0.3 did
+        return raid_status({"ok": True, "arrays": arrays}, True)
+    return "", ""
 
 
-def storage_rows(data, f, cfg):
-    """The rows of the Storage section."""
+def storage_rows(data, scfg):
+    """What the Storage section draws below the system disk: [{name, val, pct, status, cls}]."""
+    if not scfg.get("show_storage", True):
+        return []
+    pairs = storage_pairs({"server": scfg})
+    by_path = {_norm(path): label for label, path in pairs}          # explicit paths: match the label by path
+    positional = clean_list(scfg.get("storage_labels"))              # nothing listed: first label = first pool
+    arrays = []
+    if isinstance(data, dict) and isinstance(data.get("raid"), dict):
+        arrays = [a for a in (data["raid"].get("arrays") or []) if isinstance(a, dict)]
     rows = []
-    if cfg.get("show_system_disk", True):
-        rows.append(row(f"{cfg.get('system_label') or 'System'}:",
-                        size_pair(num(f.get("ssd_u")), num(f.get("ssd_t"))) if f.get("ssd_t") is not None else NA,
-                        num(f.get("ssd_p")) if f.get("ssd_t") is not None else 0))
-    disks = data.get("disks") if isinstance(data, dict) else None
-    raid = data.get("raid") if isinstance(data, dict) else None
-    if not isinstance(disks, list):
-        # an old stats.php without the disk list: all it knows is one "RAID" pool (and says if there is none)
-        no_pool = isinstance(raid, dict) and raid.get("present") is False and not raid.get("arrays")
-        if f.get("raid_t") is not None and not no_pool:
-            ok = bool(raid.get("ok")) if isinstance(raid, dict) else num(f.get("raid_t")) > 0
-            text, cls = raid_status(raid, ok)
-            rows.append(row(f"{cfg.get('raid_label') or 'RAID'}:",
-                            size_pair(num(f.get("raid_u")), num(f.get("raid_t"))) if ok else NA,
-                            num(f.get("raid_p")) if ok else 0))
-            rows.append(row("Status:", text, -1, cls))
-        return rows
-
-    arrays = {a.get("name"): a for a in (raid.get("arrays") or [])} if isinstance(raid, dict) else {}
-
-    def disk_row(label, d):
-        out = [row(f"{label}:", size_pair(num(d.get("used")), num(d.get("total"))), num(d.get("percent")))]
-        array = arrays.get(d.get("md"))
-        if array:                               # mdadm array: add its health line
-            text, cls = raid_status({"ok": True, "arrays": [array]}, True)
-            out.append(row("Status:", text, -1, cls))
-        return out
-
-    paths = [str(p).strip() for p in cfg.get("storage_paths", []) if str(p).strip()]
-    if paths:                                   # the user listed exactly what to show
-        labels = list(cfg.get("storage_labels", [])) + [""] * len(paths)
-        for path, label in zip(paths, labels):
-            label = (label or "").strip() or (path.rstrip("/").rsplit("/", 1)[-1] or "Root")
-            d = disk_for(path, disks)
-            rows += disk_row(label, d) if d else [row(f"{label}:", "Not found", 0, "bad")]
-        return rows
-
-    extra = [d for d in disks if not d.get("system")]          # automatic: everything that is not the system disk
-    extra.sort(key=lambda d: not d.get("array"))               # arrays / pools first
-    extra = extra[:max(0, int(cfg.get("max_storage_rows", 3)))]
-    n_arrays = sum(1 for d in extra if d.get("array"))
-    for d in extra:
-        base = str(d.get("mount", "")).rstrip("/").rsplit("/", 1)[-1] or str(d.get("mount", "?"))
-        if d.get("array"):
-            label = cfg.get("raid_label") or "RAID"
-            label = label if n_arrays == 1 else f"{label} {base}"
+    for i, pool in enumerate(pools_from(data)[:storage_slots({"server": scfg})]):
+        text, cls = pool_status(pool, i, arrays)
+        ok = bool(pool.get("ok"))
+        if pairs:                                   # match by path; if the server chose other paths, by position
+            custom = by_path.get(_norm(pool.get("path"))) or (pairs[i][0] if i < len(pairs) else "")
         else:
-            label = base
-        rows += disk_row(label, d)
+            custom = positional[i] if i < len(positional) else ""
+        rows.append({
+            "name": pool_label(pool, custom) + ":",
+            "val": size_pair(num(pool.get("used")), num(pool.get("total"))) if ok else "N/A",
+            "pct": num(pool.get("percent")) if ok else 0,
+            "status": text, "cls": cls,
+        })
     return rows
 
 
-def build(data, via, host_addr, speed, cfg):
-    """One JSON object for eww. `data` = stats.php's answer, or None when the server can't be reached
-    (every value then reads N/A). The Server column is a list of sections of rows, so what is shown
-    follows the [server] settings in config.toml."""
-    online = isinstance(data, dict)
-    f = flatten(data) if online else {}
-    has = lambda key: f.get(key) is not None                      # noqa: E731
-    show = lambda key: bool(cfg.get(key, True))                   # noqa: E731
+# ───────────────────────── one JSON line for eww ─────────────────────────
+def flags(scfg):
+    return {f"show_{k}": bool(scfg.get(f"show_{k}", True)) for k in SHOW_KEYS}
 
-    ram_t = num(f.get("ram_t"))
+
+def first_label(scfg):
+    pairs = storage_pairs({"server": scfg})
+    labels = [label for label, _path in pairs] or clean_list(scfg.get("storage_labels"))
+    return labels[0] if labels else ""
+
+
+def blank(scfg, title="Server offline", note="Offline"):
+    na = "N/A"
+    return {"ok": False, "title": title, "uptime": na, "clock": na, "cpu": na, "cpu_p": 0, "temp": na, "cpu_name": "",
+            "ram": na, "ram_p": 0, "swap": na, "system_name": (scfg.get("system_label") or "System") + ":",
+            "ssd": na, "ssd_p": 0,
+            "storage": [{"name": (first_label(scfg) or "Storage") + ":", "val": na, "pct": 0, "status": note, "cls": "bad"}]
+            if scfg.get("show_storage", True) else [],
+            "down": na, "up": na, **flags(scfg)}
+
+
+def build(data, via, host_addr, speed, scfg):
+    f = flatten(data)
+    ram_t = num(f.get("ram_t")) or 1
     swap_t = num(f.get("swap_t"))
-    cpu_temp = num(f.get("temp"))
-    cpu_name = str(f.get("cpu_name") or "")[:60]
-
-    head = []
-    if show("show_uptime"):
-        head.append(row("Uptime:", duration(num(f.get("uptime"))) if has("uptime") else NA))
-
-    cpu = []
-    if show("show_cpu"):
-        cpu.append(row("CPU:", f"{fmt(num(f.get('cpu')))}%" if has("cpu") else NA, num(f.get("cpu"))))
-    if show("show_clock"):
-        cpu.append(row("Clock:", clock_text(f.get("cpu_mhz"))))
-    if show("show_temperature"):
-        cpu.append(row("Temperature:", f"{fmt(cpu_temp)}°C" if cpu_temp > 0 else NA))
-    if show("show_ram"):
-        cpu.append(row("RAM:", size_pair(num(f.get("ram_u")), ram_t) if ram_t > 0 else NA, num(f.get("ram_p"))))
-    if show("show_swap"):
-        cpu.append(row("Swap:", (size_pair(num(f.get("swap_u")), swap_t) if swap_t > 0 else "None") if has("swap_t") else NA))
-
-    net = []
-    if show("show_network"):
-        net = [row("Download:", f"{speed[0]:.2f} Mbps" if online and speed else NA),
-               row("Upload:", f"{speed[1]:.2f} Mbps" if online and speed else NA)]
-
-    name = (cfg.get("name") or "").strip() or str(f.get("host") or host_addr)
-    sections = [{"t": cpu_name if cpu_name else "CPU & Memory", "rows": cpu},
-                {"t": "Storage", "rows": storage_rows(data, f, cfg)},
-                {"t": "Network", "rows": net}]
     return {
-        "ok": online,
-        "title": f"{name} · {via}" if online else "Server offline",
-        "head": head,
-        "sections": [sec for sec in sections if sec["rows"]],      # a section with nothing to show disappears
+        "ok": True,
+        "title": f"{(scfg.get('name') or '').strip() or f.get('host') or host_addr} · {via}",
+        "uptime": duration(num(f.get("uptime"))) if f.get("uptime") is not None else "N/A",
+        "clock": clock_pair(f.get("cpu_mhz"), f.get("cpu_mhz_max")),
+        "cpu": f"{fmt(num(f.get('cpu')))}%", "cpu_p": num(f.get("cpu")),
+        "temp": f"{fmt(num(f.get('temp')))}°C" if num(f.get("temp")) > 0 else "N/A",
+        "ram": size_pair(num(f.get("ram_u")), ram_t), "ram_p": num(f.get("ram_p")),
+        "swap": size_pair(num(f.get("swap_u")), swap_t) if swap_t > 0 else "None",
+        "system_name": (scfg.get("system_label") or "System") + ":",
+        "ssd": size_pair(num(f.get("ssd_u")), num(f.get("ssd_t"))), "ssd_p": num(f.get("ssd_p")),
+        "cpu_name": str(f.get("cpu_name") or "")[:60],
+        "storage": storage_rows(data, scfg),
+        "down": f"{speed[0]:.2f} Mbps", "up": f"{speed[1]:.2f} Mbps",
+        **flags(scfg),
     }
 
 
 def main():
     cfg = load_config()["server"]
-    params = request_params(cfg)
     urls = [u for u in cfg["urls"] if u] or ["http://127.0.0.1/stats.php"]
     labels = list(cfg["labels"]) + [""] * len(urls)
     timeout, interval = float(cfg["timeout"]), max(0.5, float(cfg["interval"]))
     retry = max(5, int(cfg["retry_primary"]))
+    params = server_params(cfg)
+    offline = blank(cfg)
     active, last_probe, prev = None, 0.0, None      # prev = (time, rx, tx)
 
     while True:
         started = time.monotonic()
         order = list(range(len(urls)))
-        if active and started - last_probe < retry:
+        if active is not None and started - last_probe < retry:
             order.remove(active)                  # on a fallback address: stay on it between probes
             order.insert(0, active)
         else:
@@ -221,22 +241,25 @@ def main():
         result = None
         for i in order:
             try:
-                result = (i, fetch(urls[i], cfg["token"], timeout if i == active or active is None else min(timeout, 1.0), params))
+                result = (i, fetch(urls[i], cfg["token"], timeout if i == active or active is None else min(timeout, 1.0),
+                                   params))
                 break
             except Exception:
                 continue
 
         if result is None:
             active, prev = None, None
-            emit(build(None, "", "", None, cfg))
+            emit(offline)
         else:
             i, data = result
             if i != active:
                 active, prev = i, None            # switched address -> restart the speed measurement
             f = flatten(data)
-            rx, tx, now = num(f.get("net_rx")), num(f.get("net_tx")), time.monotonic()
+            rx, tx = num(f.get("net_rx")), num(f.get("net_tx"))
+            # Speed = difference between two samples of the byte counters. Use the moment the SERVER read
+            # them (net_t) when it says so - our own clock would include the request's travel time and jitter.
+            now = num(f.get("net_t")) or time.monotonic()
             down = up = 0.0
-            # speed = difference between two samples of the byte counters
             if prev and now > prev[0]:
                 dt = now - prev[0]
                 down = (rx - prev[1]) * 8 / 1e6 / dt if rx >= prev[1] else 0.0

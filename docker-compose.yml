@@ -18,6 +18,7 @@ services:
       STATS_NET_INTERFACES: ${STATS_NET_INTERFACES:-}   # empty = all physical network cards, or e.g. enp3s0
       STATS_TOKEN: ${STATS_TOKEN:-}          # empty = no password; otherwise use stats.php?key=<token>
       STATS_HOSTNAME: ${STATS_HOSTNAME:-}    # empty = the server's own name
+      STATS_ALLOW_CLIENT_CONFIG: ${STATS_ALLOW_CLIENT_CONFIG:-1}   # 1 = the widget may pick paths/network cards (see docs); 0 = only this stack decides
     volumes:
       - type: bind
         source: ${RAID_HOST_PATH:-/raids}    # where the RAID is mounted ON THE SERVER

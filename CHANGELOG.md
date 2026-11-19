@@ -3,18 +3,24 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ## [Unreleased]
 ### Added
-- **Everything in the Server column is configurable in `stats-widget config`** (new *Server rows* tab): show/hide uptime, CPU, clock, temperature, RAM, swap, network and system disk; server name, system-disk name/path, network cards; extra storage rows by mount point with your own names, or automatic (every separate disk / RAID / pool the server reports, up to a limit). No RAID, one RAID or several - nothing to edit on the server any more. `stats.php` now lists all disks (`disks`, with the mdadm array name) and accepts `?system=` / `?net=` from the widget (only known mount points / NIC names; `allow_client_settings` turns it off).
-- **Configurable weekend and first day of the week** (`[general] weekend`, `week_start`, and *Calendar* tab). Default stays Fri + Sat, weeks start on Sunday. The weekday header follows.
-- **CPU clock speed** (average over all cores) in the PC column and, from `stats.php` (`cpu_mhz`), in the Server column - it replaces *Load average*.
-- PC column: **VRAM row only on graphics cards with their own memory** (NVIDIA, discrete AMD). Intel / APU graphics no longer show a VRAM or "Shared" line. The GPU *Clock* row is now always shown (before, VRAM replaced it).
-### Changed
-- *Load average* is gone from the widget (`stats.php` still reports `load` and `cores`).
-- The Server column is built from a list of rows sent by `scripts/server.py`; the layout no longer hard-codes them.
-### Fixed
-- NVIDIA: one unreadable value (`[N/A]` from `nvidia-smi`) blanked the whole GPU block; each value is now read on its own.
-- `stats.php`: CPU core count read `/proc/cpuinfo` twice and relied on a fragile newline test.
+- **PC Stats rows can be switched off** (`[pc] show_*` in `config.toml`, *PC data* tab in `stats-widget config`): CPU usage / clock / temperature, uptime, GPU usage / temperature, VRAM, RAM, disk, battery, network. A block with no row left disappears with its heading, and a hidden GPU block is not read at all (no `nvidia-smi` calls, a sleeping laptop GPU is left alone).
+- Server column: `name` (shown instead of the hostname) and switches for **CPU usage** and **RAM** (`show_cpu`, `show_ram`). Hidden rows give their height back to the layout. Key names from an earlier draft (`show_clock`, `show_temperature`, `show_system_disk`) are migrated.
+- **Everything on the server column is configurable from the widget** (`stats-widget config` → *Server data*): any number of storage pools (RAID, ZFS, data disks) with names, the system-disk path and name, which network cards to count, and a switch for every row. The paths are sent to `stats.php`, which validates them (`allow_client_config = false` turns this off); nothing has to be edited on the server. *Find on server…* lists the disks it sees. Old `raid_label` settings are migrated.
+- **Calendar**: first day of the week and the weekend days are settings (*Look & Size*), no longer hard-coded Sunday-first / Fri+Sat.
+- **CPU clock** (current / maximum) in the PC column and, replacing *Load average*, in the Server column (`stats.php` returns `cpu_mhz`, `cpu_mhz_max`).
+- GPU clock is shown next to the utilisation. The **VRAM row only appears for cards with their own memory** (NVIDIA, AMD); integrated GPUs show no VRAM row.
+- `stats.php` v3: `storage` list (kind, md array per mount, status per pool), `net_t` timestamp, `client_config`.
 - Server column shows the **server CPU name** (e.g. "Intel Core i3-6100") as the title of the *CPU & Memory* bar, like the PC column; `stats.php` returns `cpu_name`.
 ### Fixed
+- AMD APUs no longer get a VRAM row (they borrow system RAM); NVIDIA cards keep it and show *N/A* if `nvidia-smi` cannot read it.
+- NVIDIA: one unreadable value (`[N/A]` from `nvidia-smi`) blanked the whole GPU block; each value is now read on its own (and cached for 2 s).
+- `stats.php`: CPU core count is a single clean `/proc/cpuinfo` read again (it had gone back to a fragile newline test).
+- A weekend list with only unreadable day names no longer removes the weekend colouring (`[]` still means "no weekend").
+- Storage names follow the list order when the server chose other paths than the widget asked for (`allow_client_config` off).
+- Settings *Test* and `stats-widget doctor` printed "(RAID: …)" for servers that simply have no RAID; they now report storage found/missing.
+- Network speed uses the moment the server read its counters (less jitter than timing the request).
+- RAID health is matched to the right pool by its `/dev/mdN` device (it used to be one global line).
+- The Docker image runs several PHP workers so a second widget no longer waits on CPU sampling; `nvidia-smi` is queried at most every 2 s.
 - Portainer *Pull and redeploy* failed with "pull access denied for stats-widget-server": the compose file no longer names a pullable image (`pull_policy: build`).
 - The RAID row no longer repeats the system disk. `stats.php` compares the candidate pool with the system path (device id, mount source device, identical size and free space - the last one catches Docker bind mounts) and reports `raid.present: false`; the widget then shows no RAID row. Real `/dev/mdN` arrays are never treated as the system disk.
 - Debug page (`?debug=1`) says when a configured RAID path is the same disk as the system path.
